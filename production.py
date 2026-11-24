@@ -2,7 +2,7 @@
 import os, uuid, base64, threading, time, hmac, hashlib, logging
 from collections import OrderedDict
 from pathlib import Path
-from flask import Flask, request, session, jsonify, send_file, send_from_directory
+from flask import Flask, request, session, jsonify, send_file, send_from_directory, Response
 from io import BytesIO
 from werkzeug.exceptions import HTTPException
 from engine import analyze, MAX_BYTES
@@ -61,6 +61,11 @@ def error(message,code=400): return jsonify(error=message),code
 
 @app.before_request
 def guard():
+    access=os.getenv('PERSONAL_ACCESS_CODE','')
+    if access and request.path not in ('/health','/api/cleanup'):
+        auth=request.authorization
+        if not auth or auth.type!='basic' or not hmac.compare_digest(auth.username or '', 'studio') or not hmac.compare_digest((auth.password or '').encode(),access.encode()):
+            return Response('Personal workspace / Không gian cá nhân',401,{'WWW-Authenticate':'Basic realm="ReportStudio", charset="UTF-8"'})
     if request.path.startswith('/api/') and request.method in ('POST','DELETE'):
         # Require a same-origin browser request or a non-browser client with the custom header.
         origin=request.headers.get('Origin')
