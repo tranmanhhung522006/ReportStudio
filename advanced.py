@@ -10,8 +10,9 @@ from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml.ns import qn
 from engine import load, config, format_doc, heading_level, protected, el, set_font, unnumbered, prefix, parse_outline
 from citation_guard import compare_citations
+from layout_tools import cover_elements, fit_tables, resize_images, smart_pages
 
-EXTRA=dict(paper='A4',alignment='justify',before=0,after=6,first_indent=0,table_size=12,caption_size=12,caption_numbers=True,figure_list=True,table_list=True,page_numbers=True,page_start=1,page_position='center',page_format='decimal',update_fields=True,heading_uppercase=False,heading_bold=True,numbering_style='decimal',language='en',reference_style='none')
+EXTRA=dict(paper='A4',alignment='justify',before=0,after=6,first_indent=0,table_size=12,caption_size=12,caption_numbers=True,figure_list=True,table_list=True,page_numbers=True,page_start=1,page_position='center',page_format='decimal',update_fields=True,heading_uppercase=False,heading_bold=True,numbering_style='decimal',language='en',reference_style='none',table_fit=False,image_resize=False,smart_pages=False)
 def settings(raw):
     c={**config(raw),**EXTRA,**{k:v for k,v in raw.items() if k in EXTRA}}
     for k,v in EXTRA.items():
@@ -23,7 +24,7 @@ def settings(raw):
         if c[k] not in allowed: raise ValueError('Invalid '+k)
     return c
 
-def fields(data):
+def fields(data,allow_resize=False):
     counts=Counter()
     with ZipFile(io.BytesIO(data)) as z:
         for name in z.namelist():
@@ -38,15 +39,22 @@ def fields(data):
                 if re.search(r'ADDIN\s+(?:EN\.|EN\b|ZOTERO|CSL|MENDELEY)',instr,re.I): counts[('citation',instr)]+=1
             for tag in ('oMath','footnoteReference','endnoteReference','drawing','hyperlink','bookmarkStart','commentRangeStart'):
                 for n in root.iter():
-                    if n.tag.rsplit('}',1)[-1]==tag: counts[(tag,etree.tostring(n,method='c14n'))]+=1
+                    if n.tag.rsplit('}',1)[-1]==tag:
+                        if tag=='drawing' and allow_resize:
+                            import copy
+                            n=copy.deepcopy(n)
+                            for x in n.iter():
+                                if x.tag in (qn('wp:extent'),qn('a:ext')):
+                                    x.attrib.pop('cx',None);x.attrib.pop('cy',None)
+                        counts[(tag,etree.tostring(n,method='c14n'))]+=1
         for name in z.namelist():
             if name.startswith(('word/media/','customXml/','word/embeddings/')) and not name.endswith('/'):
                 import hashlib
                 counts[('part',name,hashlib.sha256(z.read(name)).hexdigest())]+=1
     return counts
 
-def integrity(before,after):
-    a,b=fields(before),fields(after); missing=a-b
+def integrity(before,after,allow_resize=False):
+    a,b=fields(before,allow_resize),fields(after,allow_resize); missing=a-b
     citations=compare_citations(before,after)
     return {'passed':not missing and citations['passed'],'citation_integrity':citations,'protected_objects':sum(a.values()),'citation_fields':sum(v for k,v in a.items() if k[0]=='citation'),'missing':sum(missing.values()),'missing_types':sorted({k[0] for k in missing})}
 
@@ -102,23 +110,30 @@ def field(p,instruction,placeholder='1'):
 CAP=re.compile(r'^\s*(Figure|Table|Hình|Bảng)\s+(\d+(?:[.\-]\d+)*)\s*[:.\-–]\s+(.+)$',re.I)
 def advanced(data,raw,decisions,outline=''):
     c=settings(raw); basic,report=format_doc(data,c,decisions); d=load(basic)
+    skip=cover_elements(d,c['protect_cover'])
+    if c['protect_cover'] and not skip:
+        report.update(integrity=integrity(data,data),audit=audit(data,c,outline),captions={},change_report={'unchanged':True})
+        return data,report
     paper={'A4':(21,29.7),'A5':(14.8,21),'Letter':(21.59,27.94)}[c['paper']]
-    align={'left':WD_ALIGN_PARAGRAPH.LEFT,'center':WD_ALIGN_PARAGRAPH.CENTER,'justify':WD_ALIGN_PARAGRAPH.JUSTIFY}
-    for s in d.sections:
+    align={'left':WD_ALIGN_PARAGRAPH.LEFT,'center':WD_ALIGN_PARAGRAPH.CENTER,'justify':WD_ALIGN_PARAGRAPH.JUSTIFY,'right':WD_ALIGN_PARAGRAPH.RIGHT}
+    for i,s in enumerate(d.sections):
+        if not c['format_layout'] or (skip and i==0): continue
         dims=paper[::-1] if s.page_width>s.page_height else paper
         s.page_width=Cm(dims[0]); s.page_height=Cm(dims[1])
     for n in range(1,10):
-        d.styles[f'Heading {n}'].font.bold=c['heading_bold']
-    normal=d.styles['Normal']; normal.paragraph_format.alignment=align[c['alignment']]
+        if c['format_headings'] and not skip: d.styles[f'Heading {n}'].font.bold=c['heading_bold']
+    normal=d.styles['Normal']
+    if c['format_body'] and not skip: normal.paragraph_format.alignment=align[c['alignment']]
     counts=Counter(); first=None; existing_caption_fields=False
     for p in list(d.paragraphs):
+        if p._p in skip: continue
         lev=heading_level(p)
         if first is None and lev and not unnumbered(p.text): first=p
         if protected(p):
             if any('SEQ' in (n.text or '') for n in p._p.iter(qn('w:instrText'))): existing_caption_fields=True
             continue
         m=CAP.match(p.text)
-        if m:
+        if m and c['figures']:
             kind='Figure' if m.group(1).casefold() in ('figure','hình') else 'Table'
             counts[kind]+=1
             if c['caption_numbers'] and not lev and all(all(x.tag in (qn('w:rPr'),qn('w:t')) for x in r._r) for r in p.runs):
@@ -127,21 +142,22 @@ def advanced(data,raw,decisions,outline=''):
                 p.add_run(label+' '); field(p,'SEQ '+kind+' \\* ARABIC',str(counts[kind])); p.add_run(': '+m.group(3))
             p.alignment=WD_ALIGN_PARAGRAPH.CENTER
             for r in p.runs: set_font(r,c['font'],c['caption_size'])
-        elif lev:
+        elif lev and c['format_headings']:
             for r in p.runs:
                 r.bold=c['heading_bold']
                 if lev==1 and c['heading_uppercase']: r.text=r.text.upper()
-        elif p.style.name in ('Normal','Body Text','No Spacing'):
+        elif not lev and c['format_body'] and p.style.name in ('Normal','Body Text','No Spacing'):
             p.alignment=align[c['alignment']]; f=p.paragraph_format
             f.space_before=Pt(c['before']); f.space_after=Pt(c['after']); f.first_line_indent=Cm(c['first_indent'])
     if c['tables']:
         for t in d.tables:
+            if t._tbl in skip: continue
             for row in t.rows:
                 for cell in row.cells:
                     for p in cell.paragraphs:
                         if not protected(p):
                             for r in p.runs: set_font(r,c['font'],c['table_size'])
-    if c['numbering'] and c['numbering_style']!='decimal':
+    if c['format_headings'] and c['numbering'] and c['numbering_style']!='decimal':
         root=d.part.numbering_part.element
         abstracts=root.findall(qn('w:abstractNum'))
         if abstracts:
@@ -156,9 +172,13 @@ def advanced(data,raw,decisions,outline=''):
             if c[k] and counts[kind] and c['caption_numbers'] and not re.search(r'TOC\s+\\c\s+"?'+kind,instructions,re.I):
                 p=first.insert_paragraph_before(title); p.runs[0].bold=True
                 field(first.insert_paragraph_before(),'TOC \\h \\z \\c "'+kind+'"','Update field in Word (F9).')
-    if c['page_numbers']:
+    if c['page_numbers'] and c['smart_pages']:
+        smart_pages(d,c,field,report)
+    elif c['page_numbers']:
         for i,s in enumerate(d.sections):
+            if skip and i==0: continue
             footer=s.footer
+            if skip and i==1 and footer.is_linked_to_previous: footer.is_linked_to_previous=False
             if i and footer.is_linked_to_previous: continue
             if not any(re.search(r'\bPAGE\b',n.text or '') for n in footer._element.iter(qn('w:instrText'))) and not any(re.search(r'\bPAGE\b',n.get(qn('w:instr'),'')) for n in footer._element.iter(qn('w:fldSimple'))):
                 p=footer.paragraphs[0] if not footer.paragraphs[0].text and not protected(footer.paragraphs[0]) else footer.add_paragraph()
@@ -175,13 +195,22 @@ def advanced(data,raw,decisions,outline=''):
         root=d.settings.element; n=root.find(qn('w:updateFields'))
         if n is None: n=el('updateFields'); root.append(n)
         n.set(qn('w:val'),'true')
-    b=io.BytesIO(); d.save(b); out=b.getvalue(); guard=integrity(data,out)
-    if not guard['passed']: raise ValueError('Integrity check failed: '+', '.join(guard['missing_types'])+'. Original document remains untouched.')
+    report['tables_fitted']=fit_tables(d,skip) if c['table_fit'] else 0
+    report['images_resized']=resize_images(d,skip) if c['image_resize'] else 0
+    b=io.BytesIO(); d.save(b); out=b.getvalue(); guard=integrity(data,out,c['image_resize'])
+    if not guard['passed']: raise ValueError('Integrity check failed: '+', '.join(guard['missing_types'] or ['citation payload'])+'. Original document remains untouched.')
     report.update(integrity=guard,audit=audit(out,c,outline),captions=dict(counts))
+    report['change_report']={k:report.get(k,0) for k in ('heading','body','tables','figures','cleanup_runs','citation_paragraphs_formatted','tables_fitted','images_resized','cover_protected','smart_pages_applied','toc_added')}
     if existing_caption_fields: report['warnings'].append('Existing caption fields preserved; refresh and verify sequence identifiers in Word.')
     return out,report
 
 def pdf_export(data):
+    import os
+    from zipfile import ZipFile
+    limit=int(os.getenv('PDF_MAX_MB','5'))*1024*1024
+    if len(data)>limit: raise ValueError('PDF preview exceeds configured input size limit.')
+    with ZipFile(io.BytesIO(data)) as z:
+        if sum(x.file_size for x in z.infolist())>25*1024*1024: raise ValueError('PDF preview exceeds expanded size limit.')
     exe=shutil.which('soffice') or shutil.which('libreoffice')
     if not exe:
         for candidate in [r'C:\Program Files\LibreOffice\program\soffice.exe',r'C:\Program Files (x86)\LibreOffice\program\soffice.exe']:
@@ -191,8 +220,9 @@ def pdf_export(data):
     with tempfile.TemporaryDirectory() as tmp:
         root=Path(tmp); source=root/'report.docx'; source.write_bytes(data)
         profile=(root/'profile').as_uri()
-        try: subprocess.run([exe,'-env:UserInstallation='+profile,'--headless','--convert-to','pdf','--outdir',str(root),str(source)],capture_output=True,timeout=90,check=True)
+        try: subprocess.run([exe,'-env:UserInstallation='+profile,'--headless','--convert-to','pdf','--outdir',str(root),str(source)],capture_output=True,timeout=45,check=True)
         except (subprocess.TimeoutExpired,subprocess.CalledProcessError) as exc: raise ValueError('PDF rendering failed.') from exc
         pdf=root/'report.pdf'
         if not pdf.exists(): raise ValueError('LibreOffice did not produce a PDF.')
+        if pdf.stat().st_size>20*1024*1024: raise ValueError('Rendered PDF exceeds 20 MB.')
         return pdf.read_bytes()
