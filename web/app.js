@@ -34,7 +34,7 @@ async function parseRequirements(ai){if(busy)return;if(ai&&!$('aiConsent').check
 $('parseRules').onclick=()=>parseRequirements(false);$('aiRules').onclick=()=>parseRequirements(true);
 $('applyRules').onclick=()=>{for(const i of $('ruleReview').querySelectorAll('input:checked')){const k=i.dataset.rule,e=$(k);if(e.type==='checkbox')e.checked=suggested[k];else e.value=suggested[k];}resultCache=null;renderPreview();status('Selected rules applied.');};
 $('audit').onclick=async()=>{if(busy||!documentData)return;lock(true);try{renderAudit(await documentRequest('/api/audit',{config:config(),outline:$('outline').value}));status('Original document checked.');}catch(e){status(e.message,true);}finally{lock(false);}};
-async function makePdf(download){if(busy||!documentData)return;lock(true);status('Rendering formatted document…');try{const r=await formatted(false);renderAudit(r.report.audit);const p=await request('/api/pdf',{document:r.document});const bytes=Uint8Array.from(atob(p.pdf),c=>c.charCodeAt(0));if(pdfUrl)URL.revokeObjectURL(pdfUrl);pdfUrl=URL.createObjectURL(new Blob([bytes],{type:'application/pdf'}));if(download){const a=node('a');a.href=pdfUrl;a.download=name.replace(/\.docx$/i,'')+'_formatted.pdf';a.click();}else{$('pdfFrame').src=pdfUrl;$('pdfFrame').hidden=false;}status('PDF rendered with LibreOffice. Layout may differ from Word.');}catch(e){status(e.message,true);}finally{lock(false);}}
+async function makePdf(download){if(busy||!documentData)return;lock(true);status('Rendering formatted document…');try{const r=await formatted(false);renderAudit(r.report.audit);const p=await request('/api/pdf',{document:new Blob([Uint8Array.from(atob(r.document),c=>c.charCodeAt(0))])});const bytes=Uint8Array.from(atob(p.pdf),c=>c.charCodeAt(0));if(pdfUrl)URL.revokeObjectURL(pdfUrl);pdfUrl=URL.createObjectURL(new Blob([bytes],{type:'application/pdf'}));if(download){const a=node('a');a.href=pdfUrl;a.download=name.replace(/\.docx$/i,'')+'_formatted.pdf';a.click();}else{$('pdfFrame').src=pdfUrl;$('pdfFrame').hidden=false;}status('PDF rendered with LibreOffice. Layout may differ from Word.');}catch(e){status(e.message,true);}finally{lock(false);}}
 $('preview').onclick=()=>makePdf(false);$('downloadPdf').onclick=()=>makePdf(true);
 $('file').addEventListener('change',()=>{$('auditResult').replaceChildren();$('referenceResult').replaceChildren();$('pdfFrame').hidden=true;$('pdfFrame').removeAttribute('src');if(pdfUrl){URL.revokeObjectURL(pdfUrl);pdfUrl='';}});
 
@@ -75,7 +75,7 @@ async function documentRequest(path,payload){
   return request(path,{...payload,document:selectedFile});
 }
 $('batchRun').onclick=async()=>{
- if(busy)return;const files=Array.from($('batchFiles').files);
+ if(busy)return;for(const row of $('batchResults').querySelectorAll('[data-url]'))URL.revokeObjectURL(row.dataset.url);const files=Array.from($('batchFiles').files);
  if(!files.length||files.length>5)return status('Select 1–5 DOCX files.',true);
  if(files.some(f=>f.size>15*1024*1024||!/\.docx$/i.test(f.name)))return status('Each file must be a DOCX under 15 MB.',true);
  lock(true);const root=$('batchResults');root.replaceChildren();const cfg=config();
