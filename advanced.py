@@ -157,7 +157,7 @@ def advanced(data,raw,decisions,outline=''):
                     for p in cell.paragraphs:
                         if not protected(p):
                             for r in p.runs: set_font(r,c['font'],c['table_size'])
-    if c['format_headings'] and c['numbering'] and c['numbering_style']!='decimal':
+    if c['format_headings'] and c['numbering'] and c['numbering_style']!='decimal' and report['heading']:
         root=d.part.numbering_part.element
         abstracts=root.findall(qn('w:abstractNum'))
         if abstracts:
