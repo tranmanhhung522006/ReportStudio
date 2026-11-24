@@ -9,6 +9,9 @@ from engine import analyze, MAX_BYTES
 from advanced import advanced, audit, pdf_export
 from requirement_parser import extract_text, parse_rules, ai_rules
 import storage
+from upload_cache import UploadCache, UploadExpired
+from doi_check import check_many
+uploads=UploadCache()
 from inspection import extract_sample, preview, reference_audit
 from zipfile import BadZipFile
 from docx.opc.exceptions import PackageNotFoundError
@@ -112,7 +115,7 @@ def assets(filename): return send_from_directory(ROOT,filename)
 @app.get('/api/capabilities')
 def capabilities():
     owner()
-    return jsonify(history=storage.configured(),pdf=PDF_ENABLED,ai=AI_ENABLED and bool(os.getenv('OPENAI_API_KEY')),online=True,ttl_hours=24,max_saved_bytes=storage.MAX_FILE,multipart=True,inspection=True)
+    return jsonify(history=storage.configured(),pdf=PDF_ENABLED,ai=AI_ENABLED and bool(os.getenv('OPENAI_API_KEY')),online=True,ttl_hours=24,max_saved_bytes=storage.MAX_FILE,multipart=True,inspection=True,upload_sessions=True,doi=True)
 
 @app.get('/api/history')
 def history():
@@ -138,6 +141,20 @@ def cleanup_route():
         return error('Unauthorized.',401)
     return jsonify(deleted=storage.cleanup() if database() else 0)
 
+@app.delete('/api/uploads/<uuid:upload_id>')
+def delete_upload(upload_id):
+    return jsonify(deleted=uploads.delete(owner(),str(upload_id)))
+
+@app.post('/api/doi')
+def verify_doi():
+    if not request.is_json: return error('JSON required.',415)
+    if not allowed_rate('doi:'+str(owner()),12,60): return error('DOI rate limit reached.',429)
+    if not processing.acquire(blocking=False): return error('Server busy. Retry shortly.',429)
+    try:
+        return jsonify(results=check_many(request.get_json().get('dois',[])))
+    except (ValueError,TypeError,AttributeError) as exc: return error(str(exc)[:240])
+    finally: processing.release()
+
 @app.post('/api/<any(analyze,format,requirements,audit,pdf,sample,preview,references):action>')
 def process(action):
     if not request.is_json and request.mimetype!='multipart/form-data': return error('JSON or multipart required.',415)
@@ -150,6 +167,7 @@ def process(action):
             req=json.loads(request.form.get('payload','{}'))
         if not isinstance(req,dict): return error('Invalid request.')
         def doc():
+            if req.get('upload_id'): return uploads.get(owner(),req['upload_id'])
             upload=request.files.get('document') if not request.is_json else None
             data=upload.read(MAX_BYTES+1) if upload is not None else base64.b64decode(req['document'],validate=True)
             if len(data)>MAX_BYTES: raise ValueError('Maximum file size is 15 MB.')
@@ -167,7 +185,9 @@ def process(action):
         if action=='preview': return jsonify(preview(data,req.get('outline','')))
         if action=='references': return jsonify(reference_audit(data))
         if action=='analyze':
-            result=analyze(data,req.get('outline','')); result['preview']=preview(data,req.get('outline','')); return jsonify(result)
+            result=analyze(data,req.get('outline','')); result['preview']=preview(data,req.get('outline',''))
+            if req.get('cache_upload') is True: result['upload_id']=uploads.put(owner(),data)
+            return jsonify(result)
         if action=='audit': return jsonify(audit(data,req.get('config',{}),req.get('outline','')))
         if action=='pdf': return jsonify(pdf=base64.b64encode(pdf_export(data)).decode())
         out,report=advanced(data,req['config'],req['decisions'],req.get('outline',''))
@@ -181,6 +201,8 @@ def process(action):
                 log.warning('History save failed: %s',type(exc).__name__)
                 result['storage_warning']='History unavailable. Download your result now.'
         return jsonify(result)
+    except UploadExpired as exc:
+        return jsonify(error=str(exc),code='upload_expired'),410
     except (ValueError,KeyError,TypeError,BadZipFile,PackageNotFoundError) as exc:
         return error(str(exc)[:240])
     finally: processing.release()
@@ -192,5 +214,11 @@ def cleanup_loop():
         except Exception as exc: log.warning('Cleanup failed: %s',type(exc).__name__)
         time.sleep(900)
 
+def upload_cleanup_loop():
+    while True:
+        time.sleep(60)
+        uploads.cleanup()
+
+threading.Thread(target=upload_cleanup_loop,daemon=True,name='upload-cleanup').start()
 if storage.configured():
     threading.Thread(target=cleanup_loop,daemon=True,name='history-cleanup').start()
