@@ -1,4 +1,4 @@
-# Report Studio — v1.1 Cloud Ready
+# Report Studio — v2.0 Workspace Preview
 
 Local-first formatting workspace for academic and business reports. No account required. PostgreSQL history is optional locally.
 
@@ -73,3 +73,7 @@ Set SECRET_KEY to a random value, optionally DATABASE_URL, then run:
 flask --app production run --port 8765
 ```
 The original python server.py still runs without a database. Production API regression tests use mocked storage; live Neon integration and deployment must be verified separately.
+
+## Workspace updates
+
+Quick format and advanced studio share the same formatting engine. Upload a style sample DOCX to extract common formatting rules, review suggested headings, search and undo/redo heading changes, and use the lightweight text preview without LibreOffice. The preview is approximate and excludes exact pagination, tables, and images. Presets are stored in the browser. Reference audit detects duplicate entries and DOI patterns, not verified citations. Online requests use multipart uploads where supported; formatted results are reused for repeat previews when settings are unchanged. History is opt-in and expires after 24 hours. The production database diagnostic endpoint is /health/database. PDF and cloud AI remain disabled by default on Render Free. Run CI and a real Neon smoke test before public launch.
