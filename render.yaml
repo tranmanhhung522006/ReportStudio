@@ -17,3 +17,8 @@ services:
         value: "0"
       - key: ENABLE_AI
         value: "0"
+
+      - key: PERSONAL_ACCESS_CODE
+        sync: false
+      - key: PDF_MAX_MB
+        value: "5"
