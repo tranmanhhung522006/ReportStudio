@@ -10,22 +10,26 @@ from docx.oxml.ns import qn
 from docx.shared import Cm, Pt
 
 MAX_BYTES = 15 * 1024 * 1024
+MAX_EXPANDED = 50 * 1024 * 1024
+MAX_PARAGRAPHS = 12000
 DEFAULT = dict(font='Times New Roman',size=13,line=1.5,left=3,right=2,top=2,bottom=2,h1=16,h2=14,h3=13,numbering=True,toc=True,tables=True,figures=True,chapter_break=False)
 PREFIX = re.compile(r'^\s*(\d+(?:\.\d+){0,8})[.)]?\s+(?=\D)')
 CHAPTER = re.compile(r'^\s*(?:chapter|chương)\s+(\d+|[IVXLCDM]+)\s*[:.\-–]?\s+',re.I)
 UNNUMBERED = set('abstract|acknowledgements|acknowledgments|references|bibliography|appendix|appendices|tóm tắt|lời cảm ơn|tài liệu tham khảo|phụ lục|table of contents|mục lục|list of figures|list of tables|danh mục hình|danh mục bảng'.split('|'))
 MAJOR = set('introduction|literature review|research methodology|methodology|results|discussion|results and discussion|conclusion|conclusions|recommendations|system design|implementation|testing and evaluation|requirement analysis|giới thiệu|tổng quan|phương pháp nghiên cứu|kết quả|thảo luận|kết luận'.split('|'))
 MINOR = set('research background|research objectives|research questions|theoretical framework|hypothesis development|data collection|sampling method|research design|data analysis|research gap|scope of study|problem statement|significance of study|bối cảnh nghiên cứu|mục tiêu nghiên cứu|câu hỏi nghiên cứu|phương pháp thu thập dữ liệu'.split('|'))
-CAPTION = re.compile(r'^\s*(?:figure|table|hình|bảng)\s+\d',re.I)
+CAPTION = re.compile(r'^\s*(?:figure|table|hình|bảng)\s+\d+(?:[.\-]\d+)*\s*[:.\-–]\s+\S',re.I)
 PROTECTED = set('fldChar fldSimple instrText sdt ins del oMath oMathPara hyperlink footnoteReference endnoteReference drawing pict object bookmarkStart bookmarkEnd commentRangeStart commentRangeEnd'.split())
 
 def load(data):
     if len(data)>MAX_BYTES: raise ValueError('Maximum document size: 15 MB.')
     with ZipFile(BytesIO(data)) as z:
-        if sum(x.file_size for x in z.infolist()) > 100*1024*1024: raise ValueError('Expanded document exceeds 100 MB.')
+        if len(z.infolist())>3000 or sum(x.file_size for x in z.infolist()) > MAX_EXPANDED: raise ValueError('Expanded document exceeds safe processing limits (50 MB / 3000 parts).')
         if 'word/document.xml' not in z.namelist() or any(x.flag_bits & 1 for x in z.infolist()): raise ValueError('A non-encrypted .docx file is required.')
         if any('vbaproject' in x.filename.lower() for x in z.infolist()): raise ValueError('Macros are not supported.')
-    return Document(BytesIO(data))
+    d=Document(BytesIO(data))
+    if len(d.paragraphs)>MAX_PARAGRAPHS: raise ValueError('Document contains too many paragraphs (maximum 12000).')
+    return d
 
 def norm(s): return unicodedata.normalize('NFKC',s).strip().casefold().rstrip(':')
 def has(p,tags): return any(x.tag.rsplit('}',1)[-1] in tags for x in p._p.iter())
@@ -53,11 +57,13 @@ def recognize(p,outline):
     if level: return level,'Existing Word heading','high'
     if not s or len(s)>200 or CAPTION.match(s) or protected(p): return 0,'',''
     key=norm(s)
-    if key in outline: return outline[key],'Provided outline','high'
+    m=prefix(s)
+    if key in outline or (m and norm(s[m.end():]) in outline): return outline.get(key,outline.get(norm(s[m.end():]) if m else key)),'Provided outline','high'
+    if (p._p.pPr is not None and p._p.pPr.numPr is not None) or (p.style and 'list' in p.style.name.lower()): return 0,'',''
     if unnumbered(s): return 1,'Unnumbered section','high'
     if CHAPTER.match(s): return 1,'Chapter prefix','high'
     m=PREFIX.match(s)
-    if m and len(s.split())<=18 and not s.endswith(('.', '?', '!')):
+    if m and len(s.split())<=12 and not s.endswith(('.', '?', '!')) and not re.search(r'[;:]\s+\S',s[m.end():]):
         return min(9,len(m.group(1).split('.'))),'Numbered heading candidate','medium'
     if key in MAJOR: return 1,'Common report section','medium'
     if key in MINOR: return 2,'Common subsection','medium'
@@ -137,7 +143,8 @@ def strip_prefix(p):
     return count==0
 
 def add_toc(d,first):
-    if any('TOC' in (x.text or '').upper().split() for x in d._element.iter(qn('w:instrText'))) or any('TOC' in x.get(qn('w:instr'),'').upper().split() for x in d._element.iter(qn('w:fldSimple'))): return False
+    instructions=[x.text or '' for x in d._element.iter(qn('w:instrText'))]+[x.get(qn('w:instr'),'') for x in d._element.iter(qn('w:fldSimple'))]
+    if any(re.search(r'\bTOC\b',x,re.I) and not re.search(r'\\c\s',x,re.I) for x in instructions): return False
     title=first.insert_paragraph_before('Table of Contents'); title.style=d.styles['Normal']; title.runs[0].bold=True
     p=first.insert_paragraph_before(); p.add_run()._r.append(el('fldChar',fldCharType='begin'))
     instr=el('instrText'); instr.set(qn('xml:space'),'preserve'); instr.text=' TOC \\o "1-9" \\h \\z \\u '; p.add_run()._r.append(instr)
@@ -167,7 +174,9 @@ def format_doc(data,raw_config,decisions):
             if level!=old: warnings.append(f'Paragraph {i+1}: protected content; heading change skipped.')
             continue
         if level:
-            p.style=d.styles[f'Heading {level}']; p.alignment=WD_ALIGN_PARAGRAPH.LEFT; p.paragraph_format.line_spacing=c['line']; p.paragraph_format.keep_with_next=True
+            p.style=d.styles[f'Heading {level}']; pp=p._p.get_or_add_pPr(); ol=pp.find(qn('w:outlineLvl'))
+            if ol is not None: pp.remove(ol)
+            p.alignment=WD_ALIGN_PARAGRAPH.LEFT; p.paragraph_format.line_spacing=c['line']; p.paragraph_format.keep_with_next=True
             for r in p.runs: set_font(r,c['font'],c['h'+str(min(level,3))]); r.bold=True
             if level>previous+1 and not unnumbered(p.text): warnings.append(f'Paragraph {i+1}: heading jumps from level {previous} to {level}.')
             if not unnumbered(p.text):
@@ -180,7 +189,10 @@ def format_doc(data,raw_config,decisions):
             if first is None and not unnumbered(p.text): first=p
             changes['heading']+=1
         else:
-            if old and i in chosen: p.style=normal; apply_num(p,0,1)
+            if old and i in chosen:
+                p.style=normal; apply_num(p,0,1)
+                pp=p._p.get_or_add_pPr(); ol=pp.find(qn('w:outlineLvl'))
+                if ol is not None: pp.remove(ol)
             if CAPTION.match(p.text) or (p.style and p.style.name=='Caption'):
                 if c['figures']: p.alignment=WD_ALIGN_PARAGRAPH.CENTER
             elif p.style and p.style.name in ('Normal','Body Text','No Spacing'):
