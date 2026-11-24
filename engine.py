@@ -12,7 +12,7 @@ from docx.shared import Cm, Pt
 MAX_BYTES = 15 * 1024 * 1024
 MAX_EXPANDED = 50 * 1024 * 1024
 MAX_PARAGRAPHS = 12000
-DEFAULT = dict(font='Times New Roman',size=13,line=1.5,left=3,right=2,top=2,bottom=2,h1=16,h2=14,h3=13,numbering=True,toc=True,tables=True,figures=True,chapter_break=False)
+DEFAULT = dict(font='Times New Roman',size=13,line=1.5,left=3,right=2,top=2,bottom=2,h1=16,h2=14,h3=13,numbering=True,toc=True,tables=True,figures=True,chapter_break=False,format_body=True,format_headings=True,format_layout=True,protect_cover=False,cleanup_text=False,format_citations=False)
 PREFIX = re.compile(r'^\s*(\d+(?:\.\d+){0,8})[.)]?\s+(?=\D)')
 CHAPTER = re.compile(r'^\s*(?:chapter|chương)\s+(\d+|[IVXLCDM]+)\s*[:.\-–]?\s+',re.I)
 UNNUMBERED = set('abstract|acknowledgements|acknowledgments|references|bibliography|appendix|appendices|tóm tắt|lời cảm ơn|tài liệu tham khảo|phụ lục|table of contents|mục lục|list of figures|list of tables|danh mục hình|danh mục bảng'.split('|'))
@@ -55,7 +55,7 @@ def heading_level(p):
 def recognize(p,outline):
     s=p.text.strip(); level=heading_level(p)
     if level: return level,'Existing Word heading','high'
-    if not s or len(s)>200 or CAPTION.match(s) or protected(p): return 0,'',''
+    if not s or len(s)>200 or CAPTION.match(s) or protected(p) or (p.style and p.style.name in ('Title','Subtitle','Caption')): return 0,'',''
     key=norm(s)
     m=prefix(s)
     if key in outline or (m and norm(s[m.end():]) in outline): return outline.get(key,outline.get(norm(s[m.end():]) if m else key)),'Provided outline','high'
@@ -64,11 +64,13 @@ def recognize(p,outline):
     if CHAPTER.match(s): return 1,'Chapter prefix','high'
     m=PREFIX.match(s)
     if m and len(s.split())<=12 and not s.endswith(('.', '?', '!')) and not re.search(r'[;:]\s+\S',s[m.end():]):
-        return min(9,len(m.group(1).split('.'))),'Numbered heading candidate','medium'
+        depth=min(9,len(m.group(1).split('.')))
+        title=norm(s[m.end():]); confidence='high' if title in MAJOR or title in MINOR else 'medium'
+        return depth,'Numbered heading candidate',confidence
     if key in MAJOR: return 1,'Common report section','medium'
     if key in MINOR: return 2,'Common subsection','medium'
     runs=[r for r in p.runs if r.text.strip()]
-    if runs and all(r.bold is True for r in runs) and len(s.split())<=14 and not s.endswith(('.', '?','!')):
+    if runs and all(r.bold is True or (r.bold is None and p.style and p.style.font.bold is True) for r in runs) and len(s.split())<=14 and not s.endswith(('.', '?','!')):
         return 2,'Short bold paragraph; verify','low'
     return 0,'',''
 
@@ -97,7 +99,7 @@ def config(raw):
     for k in ('size','h1','h2','h3','line','left','right','top','bottom'):
         c[k]=float(c[k]); lo,hi=(0.5,5) if k in ('left','right','top','bottom') else (1,3) if k=='line' else (8,40)
         if not lo<=c[k]<=hi: raise ValueError('Invalid value: '+k)
-    for k in ('numbering','toc','tables','figures','chapter_break'):
+    for k in ('numbering','toc','tables','figures','chapter_break','format_body','format_headings','format_layout','protect_cover','cleanup_text','format_citations'):
         if not isinstance(c[k],bool): raise ValueError('Invalid switch: '+k)
     return c
 
@@ -153,30 +155,43 @@ def add_toc(d,first):
 
 def format_doc(data,raw_config,decisions):
     d=load(data); c=config(raw_config)
+    from layout_tools import cover_elements, safe_runs
+    skip=cover_elements(d,c['protect_cover'])
     changes=dict(heading=0,body=0,tables=0,figures=0,protected=0,toc_added=False,warnings=[])
-    warnings=changes['warnings']; chosen={int(k):int(v) for k,v in decisions.items()}; paras=list(d.paragraphs)
+    warnings=changes['warnings']; changes['cover_protected']=bool(skip); changes['cleanup_runs']=0; changes['citation_paragraphs_formatted']=0
+    if c['protect_cover'] and not skip: warnings.append('Cover protection requires an existing section break after the cover. No changes applied.'); return data,changes
+    chosen={int(k):int(v) for k,v in decisions.items()}; paras=list(d.paragraphs)
     if any(i<0 or i>=len(paras) or not 0<=v<=9 for i,v in chosen.items()): raise ValueError('Invalid paragraph selection.')
-    for sec in d.sections:
+    for i,sec in enumerate(d.sections):
+        if not c['format_layout'] or (skip and i==0): continue
         landscape=sec.page_width and sec.page_height and sec.page_width>sec.page_height
         sec.page_width=Cm(29.7 if landscape else 21); sec.page_height=Cm(21 if landscape else 29.7)
         for k in ('left','right','top','bottom'): setattr(sec,k+'_margin',Cm(c[k]))
-    normal=d.styles['Normal']; set_font(normal,c['font'],c['size']); normal.paragraph_format.line_spacing=c['line']; normal.paragraph_format.alignment=WD_ALIGN_PARAGRAPH.JUSTIFY
+    normal=d.styles['Normal']
+    if c['format_body'] and not skip: set_font(normal,c['font'],c['size']); normal.paragraph_format.line_spacing=c['line']; normal.paragraph_format.alignment=WD_ALIGN_PARAGRAPH.JUSTIFY
     for level in range(1,10):
+        if not c['format_headings'] or skip: continue
         s=d.styles[f'Heading {level}']; set_font(s,c['font'],c['h'+str(min(level,3))]); s.font.bold=True; s.paragraph_format.keep_with_next=True; s.paragraph_format.space_before=Pt(12); s.paragraph_format.space_after=Pt(6); s.paragraph_format.line_spacing=c['line']; s.paragraph_format.alignment=WD_ALIGN_PARAGRAPH.LEFT
-    num=native_numbering(d) if c['numbering'] else None; first=None; previous=0
+    num=native_numbering(d) if c['numbering'] and c['format_headings'] else None; first=None; previous=0
     for i,p in enumerate(paras):
+        if p._p in skip: continue
         level=chosen.get(i,heading_level(p)); old=heading_level(p)
         if not p.text.strip():
             if c['figures'] and has(p,{'drawing','pict'}): p.alignment=WD_ALIGN_PARAGRAPH.CENTER; changes['figures']+=1
             continue
         if protected(p):
             changes['protected']+=1
+            if c['format_body'] and c['format_citations'] and not old and any(re.search(r'ADDIN\s+(?:EN\.|EN\b|ZOTERO|CSL|MENDELEY)',n.text or '',re.I) for n in p._p.iter(qn('w:instrText'))):
+                p.paragraph_format.line_spacing=c['line']; p.alignment=WD_ALIGN_PARAGRAPH.JUSTIFY; changes['citation_paragraphs_formatted']+=1
             if level!=old: warnings.append(f'Paragraph {i+1}: protected content; heading change skipped.')
+            continue
+        if level and not c['format_headings']:
+            if first is None and old and not unnumbered(p.text): first=p
             continue
         if level:
             p.style=d.styles[f'Heading {level}']; pp=p._p.get_or_add_pPr(); ol=pp.find(qn('w:outlineLvl'))
             if ol is not None: pp.remove(ol)
-            p.alignment=WD_ALIGN_PARAGRAPH.LEFT; p.paragraph_format.line_spacing=c['line']; p.paragraph_format.keep_with_next=True
+            p.alignment=WD_ALIGN_PARAGRAPH.LEFT; p.paragraph_format.line_spacing=c['line']; p.paragraph_format.keep_with_next=True; p.paragraph_format.space_before=Pt(12); p.paragraph_format.space_after=Pt(6)
             for r in p.runs: set_font(r,c['font'],c['h'+str(min(level,3))]); r.bold=True
             if level>previous+1 and not unnumbered(p.text): warnings.append(f'Paragraph {i+1}: heading jumps from level {previous} to {level}.')
             if not unnumbered(p.text):
@@ -184,23 +199,31 @@ def format_doc(data,raw_config,decisions):
                     if strip_prefix(p): apply_num(p,num,level)
                     else: warnings.append(f'Paragraph {i+1}: numbering skipped to preserve complex text.')
                 previous=level
-            else: apply_num(p,0,1)
+            elif c['numbering']: apply_num(p,0,1)
             if level==1 and c['chapter_break'] and first is not None and not unnumbered(p.text): p.paragraph_format.page_break_before=True
             if first is None and not unnumbered(p.text): first=p
             changes['heading']+=1
         else:
+            if old and not c['format_headings']: continue
             if old and i in chosen:
                 p.style=normal; apply_num(p,0,1)
                 pp=p._p.get_or_add_pPr(); ol=pp.find(qn('w:outlineLvl'))
                 if ol is not None: pp.remove(ol)
             if CAPTION.match(p.text) or (p.style and p.style.name=='Caption'):
                 if c['figures']: p.alignment=WD_ALIGN_PARAGRAPH.CENTER
+                if not c['format_body']: continue
             elif p.style and p.style.name in ('Normal','Body Text','No Spacing'):
+                if not c['format_body']: continue
                 p.alignment=WD_ALIGN_PARAGRAPH.JUSTIFY; p.paragraph_format.line_spacing=c['line']; changes['body']+=1
             else: continue
-            for r in p.runs: set_font(r,c['font'],c['size'])
+            for r in p.runs:
+                set_font(r,c['font'],c['size'])
+                if c['cleanup_text'] and not old and safe_runs(p):
+                    text=re.sub(r' {2,}',' ',r.text)
+                    if text!=r.text: r.text=text; changes['cleanup_runs']+=1
     if c['tables']:
         for t in d.tables:
+            if t._tbl in skip: continue
             seen=set()
             for row in t.rows:
                 for cell in row.cells:
