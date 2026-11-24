@@ -97,7 +97,104 @@ def field(p,instruction,placeholder='1'):
     n=el('instrText'); n.set(qn('xml:space'),'preserve'); n.text=' '+instruction+' '; p.add_run()._r.append(n)
     p.add_run()._r.append(el('fldChar',fldCharType='separate')); p.add_run(placeholder); p.add_run()._r.append(el('fldChar',fldCharType='end'))
 
-CAP=re.compile(r'^\s*(Figure|Table|Hình|Bảng)\s+(\d+(?:[.\-]\d+)*)\s*[:.\-–]?\s*(.*)$',re.I)
+CAP=re.compile(r'^\s*(Figure|Table|Hình|Bảng)\s+(\d+(?:[.\-]\d+)*)\s*[:.\-–]\s+(.+)
+def advanced(data,raw,decisions,outline=''):
+    c=settings(raw); basic,report=format_doc(data,c,decisions); d=load(basic)
+    paper={'A4':(21,29.7),'A5':(14.8,21),'Letter':(21.59,27.94)}[c['paper']]
+    align={'left':WD_ALIGN_PARAGRAPH.LEFT,'center':WD_ALIGN_PARAGRAPH.CENTER,'justify':WD_ALIGN_PARAGRAPH.JUSTIFY}
+    for s in d.sections:
+        dims=paper[::-1] if s.page_width>s.page_height else paper
+        s.page_width=Cm(dims[0]); s.page_height=Cm(dims[1])
+    for n in range(1,10):
+        d.styles[f'Heading {n}'].font.bold=c['heading_bold']
+    normal=d.styles['Normal']; normal.paragraph_format.alignment=align[c['alignment']]
+    counts=Counter(); first=None; existing_caption_fields=False
+    for p in list(d.paragraphs):
+        lev=heading_level(p)
+        if first is None and lev and not unnumbered(p.text): first=p
+        if protected(p):
+            if any('SEQ' in (n.text or '') for n in p._p.iter(qn('w:instrText'))): existing_caption_fields=True
+            continue
+        m=CAP.match(p.text)
+        if m:
+            kind='Figure' if m.group(1).casefold() in ('figure','hình') else 'Table'
+            counts[kind]+=1
+            if c['caption_numbers'] and not lev and all(all(x.tag in (qn('w:rPr'),qn('w:t')) for x in r._r) for r in p.runs):
+                # Retain title text and native sequence; existing complex captions are never rewritten.
+                p.clear(); p.style=d.styles['Caption']; label=({'Figure':'Hình','Table':'Bảng'}[kind] if c['language']=='vi' else kind)
+                p.add_run(label+' '); field(p,'SEQ '+kind+' \\* ARABIC',str(counts[kind])); p.add_run(': '+m.group(3))
+            p.alignment=WD_ALIGN_PARAGRAPH.CENTER
+            for r in p.runs: set_font(r,c['font'],c['caption_size'])
+        elif lev:
+            for r in p.runs:
+                r.bold=c['heading_bold']
+                if lev==1 and c['heading_uppercase']: r.text=r.text.upper()
+        elif p.style.name in ('Normal','Body Text','No Spacing'):
+            p.alignment=align[c['alignment']]; f=p.paragraph_format
+            f.space_before=Pt(c['before']); f.space_after=Pt(c['after']); f.first_line_indent=Cm(c['first_indent'])
+    if c['tables']:
+        for t in d.tables:
+            for row in t.rows:
+                for cell in row.cells:
+                    for p in cell.paragraphs:
+                        if not protected(p):
+                            for r in p.runs: set_font(r,c['font'],c['table_size'])
+    if c['numbering'] and c['numbering_style']!='decimal':
+        root=d.part.numbering_part.element
+        abstracts=root.findall(qn('w:abstractNum'))
+        if abstracts:
+            for level in abstracts[-1].findall(qn('w:lvl')):
+                i=int(level.get(qn('w:ilvl')))
+                if i==0:
+                    if c['numbering_style']=='roman': level.find(qn('w:numFmt')).set(qn('w:val'),'upperRoman')
+                    else: level.find(qn('w:lvlText')).set(qn('w:val'),('Chương ' if c['language']=='vi' else 'Chapter ')+'%1.')
+    instructions=' '.join(n.text or '' for n in d._element.iter(qn('w:instrText')))
+    if first is not None:
+        for k,kind,title in [('figure_list','Figure','Danh mục hình' if c['language']=='vi' else 'List of Figures'),('table_list','Table','Danh mục bảng' if c['language']=='vi' else 'List of Tables')]:
+            if c[k] and counts[kind] and c['caption_numbers'] and not re.search(r'TOC\s+\\c\s+"?'+kind,instructions,re.I):
+                p=first.insert_paragraph_before(title); p.runs[0].bold=True
+                field(first.insert_paragraph_before(),'TOC \\h \\z \\c "'+kind+'"','Update field in Word (F9).')
+    if c['page_numbers']:
+        for i,s in enumerate(d.sections):
+            footer=s.footer
+            if i and footer.is_linked_to_previous: continue
+            if not any(re.search(r'\bPAGE\b',n.text or '') for n in footer._element.iter(qn('w:instrText'))) and not any(re.search(r'\bPAGE\b',n.get(qn('w:instr'),'')) for n in footer._element.iter(qn('w:fldSimple'))):
+                p=footer.paragraphs[0] if not footer.paragraphs[0].text and not protected(footer.paragraphs[0]) else footer.add_paragraph()
+                p.alignment=align[c['page_position']]; field(p,'PAGE')
+            pg=s._sectPr.find(qn('w:pgNumType'))
+            if pg is None: pg=el('pgNumType'); s._sectPr.append(pg)
+            pg.set(qn('w:fmt'),c['page_format'])
+            if i==0: pg.set(qn('w:start'),str(int(c['page_start'])))
+    # Avoid global field auto-update when citations are present.
+    if any(k[0]=='citation' for k in fields(data)):
+        root=d.settings.element; n=root.find(qn('w:updateFields'))
+        if n is not None: n.set(qn('w:val'),'false')
+    elif c['update_fields']:
+        root=d.settings.element; n=root.find(qn('w:updateFields'))
+        if n is None: n=el('updateFields'); root.append(n)
+        n.set(qn('w:val'),'true')
+    b=io.BytesIO(); d.save(b); out=b.getvalue(); guard=integrity(data,out)
+    if not guard['passed']: raise ValueError('Integrity check failed: '+', '.join(guard['missing_types'])+'. Original document remains untouched.')
+    report.update(integrity=guard,audit=audit(out,c,outline),captions=dict(counts))
+    if existing_caption_fields: report['warnings'].append('Existing caption fields preserved; refresh and verify sequence identifiers in Word.')
+    return out,report
+
+def pdf_export(data):
+    exe=shutil.which('soffice') or shutil.which('libreoffice')
+    if not exe:
+        for candidate in [r'C:\Program Files\LibreOffice\program\soffice.exe',r'C:\Program Files (x86)\LibreOffice\program\soffice.exe']:
+            if Path(candidate).exists(): exe=candidate; break
+    if not exe: raise ValueError('Install LibreOffice to enable PDF preview and export.')
+    load(data)
+    with tempfile.TemporaryDirectory() as tmp:
+        root=Path(tmp); source=root/'report.docx'; source.write_bytes(data)
+        profile=(root/'profile').as_uri()
+        try: subprocess.run([exe,'-env:UserInstallation='+profile,'--headless','--convert-to','pdf','--outdir',str(root),str(source)],capture_output=True,timeout=90,check=True)
+        except (subprocess.TimeoutExpired,subprocess.CalledProcessError) as exc: raise ValueError('PDF rendering failed.') from exc
+        pdf=root/'report.pdf'
+        if not pdf.exists(): raise ValueError('LibreOffice did not produce a PDF.')
+        return pdf.read_bytes()
+,re.I)
 def advanced(data,raw,decisions,outline=''):
     c=settings(raw); basic,report=format_doc(data,c,decisions); d=load(basic)
     paper={'A4':(21,29.7),'A5':(14.8,21),'Letter':(21.59,27.94)}[c['paper']]
