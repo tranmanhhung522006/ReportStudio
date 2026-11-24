@@ -26,3 +26,14 @@ class ProductionTests(unittest.TestCase):
             self.client.get('/api/history')
             app.test_client().get('/api/history')
             self.assertNotEqual(query.call_args_list[0].args[0],query.call_args_list[1].args[0])
+
+    def test_multipart(self):
+        import io, json
+        from docx import Document
+        b=io.BytesIO(); d=Document(); d.add_heading('Introduction',1); d.save(b); b.seek(0)
+        r=self.client.post('/api/analyze',data={'document':(b,'sample.docx'),'payload':json.dumps({})},headers={'X-ReportStudio':'1'})
+        self.assertEqual(r.status_code,200)
+        self.assertEqual(r.json['preview']['blocks'][0]['level'],1)
+    def test_missing_file(self):
+        with patch('production.database',return_value=True),patch('storage.get_file',return_value=None):
+            self.assertEqual(self.client.get('/api/history/00000000-0000-0000-0000-000000000001').status_code,404)
