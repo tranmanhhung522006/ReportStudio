@@ -16,3 +16,6 @@ jobs:
         with:
           node-version: '22'
       - run: node --check web/app.js
+
+      - run: node --check web/i18n.js
+      - run: python -m compileall -q .
