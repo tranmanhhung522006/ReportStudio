@@ -12,7 +12,7 @@ class Handler(BaseHTTPRequestHandler):
         if isinstance(data,dict): data=json.dumps(data,ensure_ascii=False).encode()
         self.send_response(code); self.send_header('Content-Type',content_type); self.send_header('Content-Length',str(len(data))); self.send_header('Cache-Control','no-store'); self.send_header('X-Content-Type-Options','nosniff'); self.send_header('Content-Security-Policy',"default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; frame-src blob:; frame-ancestors 'none'; base-uri 'none'"); self.end_headers(); self.wfile.write(data)
     def do_GET(self):
-        mapping={'/':('index.html','text/html; charset=utf-8'),'/style.css':('style.css','text/css; charset=utf-8'),'/app.js':('app.js','text/javascript; charset=utf-8')}
+        mapping={'/':('index.html','text/html; charset=utf-8'),'/style.css':('style.css','text/css; charset=utf-8'),'/app.js':('app.js','text/javascript; charset=utf-8'),'/i18n.js':('i18n.js','text/javascript; charset=utf-8')}
         if self.path=='/api/capabilities': return self.send(200,{'history':False,'pdf':True,'ai':True,'online':False,'multipart':False,'inspection':True})
         if self.path not in mapping: return self.send(404,{'error':'Not found'})
         name,mime=mapping[self.path]; self.send(200,(ROOT/name).read_bytes(),mime)
