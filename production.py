@@ -109,7 +109,7 @@ def index():
     owner()
     return send_from_directory(ROOT,'index.html')
 
-@app.get('/<any(style.css,app.js):filename>')
+@app.get('/<any(style.css,app.js,i18n.js):filename>')
 def assets(filename): return send_from_directory(ROOT,filename)
 
 @app.get('/api/capabilities')
