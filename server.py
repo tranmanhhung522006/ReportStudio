@@ -5,6 +5,7 @@ import base64, json, webbrowser, threading
 from engine import analyze, MAX_BYTES
 from advanced import advanced, audit, pdf_export, settings
 from requirement_parser import extract_text, parse_rules, ai_rules
+from inspection import extract_sample, preview, reference_audit
 ROOT=Path(__file__).resolve().parent/'web'
 class Handler(BaseHTTPRequestHandler):
     def send(self, code, data, content_type='application/json; charset=utf-8'):
@@ -12,10 +13,11 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(code); self.send_header('Content-Type',content_type); self.send_header('Content-Length',str(len(data))); self.send_header('Cache-Control','no-store'); self.send_header('X-Content-Type-Options','nosniff'); self.send_header('Content-Security-Policy',"default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; frame-src blob:; frame-ancestors 'none'; base-uri 'none'"); self.end_headers(); self.wfile.write(data)
     def do_GET(self):
         mapping={'/':('index.html','text/html; charset=utf-8'),'/style.css':('style.css','text/css; charset=utf-8'),'/app.js':('app.js','text/javascript; charset=utf-8')}
+        if self.path=='/api/capabilities': return self.send(200,{'history':False,'pdf':True,'ai':True,'online':False,'multipart':False,'inspection':True})
         if self.path not in mapping: return self.send(404,{'error':'Not found'})
         name,mime=mapping[self.path]; self.send(200,(ROOT/name).read_bytes(),mime)
     def do_POST(self):
-        if self.path not in ('/api/analyze','/api/format','/api/requirements','/api/audit','/api/pdf'): return self.send(404,{'error':'Not found'})
+        if self.path not in ('/api/analyze','/api/format','/api/requirements','/api/audit','/api/pdf','/api/sample','/api/preview','/api/references'): return self.send(404,{'error':'Not found'})
         if self.headers.get('Origin') not in (None,'http://127.0.0.1:8765','http://localhost:8765'): return self.send(403,{'error':'Invalid origin'})
         if self.headers.get('Host') not in ('127.0.0.1:8765','localhost:8765'): return self.send(403,{'error':'Invalid host'})
         if self.headers.get_content_type()!='application/json': return self.send(415,{'error':'JSON required'})
@@ -28,7 +30,11 @@ class Handler(BaseHTTPRequestHandler):
                 result=ai_rules(source,req.get('consent',False)) if req.get('ai') else parse_rules(source)
                 self.send(200,result); return
             data=base64.b64decode(req['document'],validate=True)
-            if self.path=='/api/analyze': self.send(200,analyze(data,req.get('outline','')))
+            if self.path=='/api/analyze':
+                result=analyze(data,req.get('outline','')); result['preview']=preview(data,req.get('outline','')); self.send(200,result)
+            elif self.path=='/api/sample': self.send(200,extract_sample(data))
+            elif self.path=='/api/preview': self.send(200,preview(data,req.get('outline','')))
+            elif self.path=='/api/references': self.send(200,reference_audit(data))
             elif self.path=='/api/audit': self.send(200,audit(data,req.get('config',{}),req.get('outline','')))
             elif self.path=='/api/pdf': self.send(200,{'pdf':base64.b64encode(pdf_export(data)).decode()})
             else:
