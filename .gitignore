@@ -3,3 +3,8 @@ __pycache__/
 *.pyc
 *.docx
 .pytest_cache/
+
+.env
+.env.*
+!.env.example
+*.pdf
