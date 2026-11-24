@@ -9,6 +9,7 @@ from docx.shared import Cm, Pt
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml.ns import qn
 from engine import load, config, format_doc, heading_level, protected, el, set_font, unnumbered, prefix, parse_outline
+from citation_guard import compare_citations
 
 EXTRA=dict(paper='A4',alignment='justify',before=0,after=6,first_indent=0,table_size=12,caption_size=12,caption_numbers=True,figure_list=True,table_list=True,page_numbers=True,page_start=1,page_position='center',page_format='decimal',update_fields=True,heading_uppercase=False,heading_bold=True,numbering_style='decimal',language='en',reference_style='none')
 def settings(raw):
@@ -46,7 +47,8 @@ def fields(data):
 
 def integrity(before,after):
     a,b=fields(before),fields(after); missing=a-b
-    return {'passed':not missing,'protected_objects':sum(a.values()),'citation_fields':sum(v for k,v in a.items() if k[0]=='citation'),'missing':sum(missing.values()),'missing_types':sorted({k[0] for k in missing})}
+    citations=compare_citations(before,after)
+    return {'passed':not missing and citations['passed'],'citation_integrity':citations,'protected_objects':sum(a.values()),'citation_fields':sum(v for k,v in a.items() if k[0]=='citation'),'missing':sum(missing.values()),'missing_types':sorted({k[0] for k in missing})}
 
 def audit(data,raw,outline=''):
     d=load(data); c=settings(raw); issues=[]; checks=Counter(); failed=Counter()
