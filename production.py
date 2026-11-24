@@ -9,6 +9,9 @@ from engine import analyze, MAX_BYTES
 from advanced import advanced, audit, pdf_export
 from requirement_parser import extract_text, parse_rules, ai_rules
 import storage
+from inspection import extract_sample, preview, reference_audit
+from zipfile import BadZipFile
+from docx.opc.exceptions import PackageNotFoundError
 
 ROOT=Path(__file__).resolve().parent/'web'
 app=Flask(__name__,static_folder=None)
@@ -16,7 +19,7 @@ secret=os.environ.get('SECRET_KEY')
 if not secret or len(secret)<32: raise RuntimeError('Set SECRET_KEY to a random secret of at least 32 characters.')
 app.config.update(SECRET_KEY=secret,MAX_CONTENT_LENGTH=MAX_BYTES*2,SESSION_COOKIE_HTTPONLY=True,
                   SESSION_COOKIE_SECURE=os.environ.get('RENDER')=='true' or os.environ.get('SECURE_COOKIE')=='1',
-                  SESSION_COOKIE_SAMESITE='Strict',PERMANENT_SESSION_LIFETIME=86400*7)
+                  SESSION_COOKIE_SAMESITE='Strict',PERMANENT_SESSION_LIFETIME=86400*7, MAX_FORM_MEMORY_SIZE=512*1024, MAX_FORM_PARTS=8)
 log=logging.getLogger(__name__)
 PDF_ENABLED=os.getenv('ENABLE_PDF','0')=='1'
 AI_ENABLED=os.getenv('ENABLE_AI','0')=='1'
@@ -73,6 +76,8 @@ def headers(response):
     response.headers['Cache-Control']='no-store'
     response.headers['X-Content-Type-Options']='nosniff'
     response.headers['Referrer-Policy']='no-referrer'
+    response.headers['X-Frame-Options']='DENY'
+    response.headers['Permissions-Policy']='camera=(), microphone=(), geolocation=()'
     response.headers['Content-Security-Policy']="default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; frame-src blob:; frame-ancestors 'none'; base-uri 'none'; object-src 'none'"
     return response
 
@@ -87,6 +92,15 @@ def unexpected(e):
 @app.get('/health')
 def health(): return jsonify(status='ok')
 
+@app.get('/health/database')
+def database_health():
+    if not storage.configured(): return jsonify(status='disabled')
+    try:
+        database()
+        with storage.connect() as db: db.execute('SELECT 1')
+        return jsonify(status='ok')
+    except Exception: return jsonify(status='unavailable'),503
+
 @app.get('/')
 def index():
     owner()
@@ -98,7 +112,7 @@ def assets(filename): return send_from_directory(ROOT,filename)
 @app.get('/api/capabilities')
 def capabilities():
     owner()
-    return jsonify(history=storage.configured(),pdf=PDF_ENABLED,ai=AI_ENABLED and bool(os.getenv('OPENAI_API_KEY')),online=True,ttl_hours=24,max_saved_bytes=storage.MAX_FILE)
+    return jsonify(history=storage.configured(),pdf=PDF_ENABLED,ai=AI_ENABLED and bool(os.getenv('OPENAI_API_KEY')),online=True,ttl_hours=24,max_saved_bytes=storage.MAX_FILE,multipart=True,inspection=True)
 
 @app.get('/api/history')
 def history():
@@ -124,19 +138,24 @@ def cleanup_route():
         return error('Unauthorized.',401)
     return jsonify(deleted=storage.cleanup() if database() else 0)
 
-@app.post('/api/<any(analyze,format,requirements,audit,pdf):action>')
+@app.post('/api/<any(analyze,format,requirements,audit,pdf,sample,preview,references):action>')
 def process(action):
-    if not request.is_json: return error('JSON required.',415)
+    if not request.is_json and request.mimetype!='multipart/form-data': return error('JSON or multipart required.',415)
     if not processing.acquire(blocking=False): return error('Server busy. Retry shortly.',429)
     try:
-        req=request.get_json()
+        if request.is_json:
+            req=request.get_json()
+        else:
+            import json
+            req=json.loads(request.form.get('payload','{}'))
         if not isinstance(req,dict): return error('Invalid request.')
         def doc():
-            data=base64.b64decode(req['document'],validate=True)
+            upload=request.files.get('document') if not request.is_json else None
+            data=upload.read(MAX_BYTES+1) if upload is not None else base64.b64decode(req['document'],validate=True)
             if len(data)>MAX_BYTES: raise ValueError('Maximum file size is 15 MB.')
             return data
         if action=='requirements':
-            source=extract_text(doc(),req['filename']) if req.get('document') else req.get('text','')
+            source=extract_text(doc(),req['filename']) if req.get('document') or (not request.is_json and 'document' in request.files) else req.get('text','')
             if req.get('ai'):
                 if not AI_ENABLED: return error('Cloud AI disabled.',403)
                 if not allowed_rate('ai:'+str(owner()),3,86400): return error('Daily AI limit reached.',429)
@@ -144,7 +163,11 @@ def process(action):
             return jsonify(parse_rules(source))
         if action=='pdf' and not PDF_ENABLED: return error('PDF conversion is disabled on this server.',403)
         data=doc()
-        if action=='analyze': return jsonify(analyze(data,req.get('outline','')))
+        if action=='sample': return jsonify(extract_sample(data))
+        if action=='preview': return jsonify(preview(data,req.get('outline','')))
+        if action=='references': return jsonify(reference_audit(data))
+        if action=='analyze':
+            result=analyze(data,req.get('outline','')); result['preview']=preview(data,req.get('outline','')); return jsonify(result)
         if action=='audit': return jsonify(audit(data,req.get('config',{}),req.get('outline','')))
         if action=='pdf': return jsonify(pdf=base64.b64encode(pdf_export(data)).decode())
         out,report=advanced(data,req['config'],req['decisions'],req.get('outline',''))
@@ -158,7 +181,7 @@ def process(action):
                 log.warning('History save failed: %s',type(exc).__name__)
                 result['storage_warning']='History unavailable. Download your result now.'
         return jsonify(result)
-    except (ValueError,KeyError,TypeError) as exc:
+    except (ValueError,KeyError,TypeError,BadZipFile,PackageNotFoundError) as exc:
         return error(str(exc)[:240])
     finally: processing.release()
 
