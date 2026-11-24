@@ -1,4 +1,4 @@
-# Report Studio — v2.0 Workspace Preview
+# Report Studio — v2.1 Advanced Document Tools
 
 Local-first formatting workspace for academic and business reports. No account required. PostgreSQL history is optional locally.
 
@@ -77,3 +77,7 @@ The original python server.py still runs without a database. Production API regr
 ## Workspace updates
 
 Quick format and advanced studio share the same formatting engine. Upload a style sample DOCX to extract common formatting rules, review suggested headings, search and undo/redo heading changes, and use the lightweight text preview without LibreOffice. The preview is approximate and excludes exact pagination, tables, and images. Presets are stored in the browser. Reference audit detects duplicate entries and DOI patterns, not verified citations. Online requests use multipart uploads where supported; formatted results are reused for repeat previews when settings are unchanged. History is opt-in and expires after 24 hours. The production database diagnostic endpoint is /health/database. PDF and cloud AI remain disabled by default on Render Free. Run CI and a real Neon smoke test before public launch.
+
+## v2.1
+
+Vietnamese/English UI toggle (technical API messages may remain English); sequential batch processing of up to five DOCX files; DOI checks via Crossref and DataCite (registry match only, not citation correctness); owner-scoped temporary original uploads on Render disk for 30 minutes, bounded at 45 MB and automatically re-uploaded from the selected browser file after expiry or restart. Original uploads are never stored in Neon. Formatted DOCX history remains opt-in, 24 hours. One worker is required for the ephemeral cache. Docker with ENABLE_PDF=1 provides full-page LibreOffice previews, including images and tables, but does not guarantee Microsoft Word pagination; memory usage on Render Free is unverified. Native Python deployment keeps PDF disabled. Citation guard compares field instructions and displayed citation values, with synthetic EndNote-style regression fixtures; real Word/EndNote plugin validation remains required. No accounts added. Batch exports are downloaded individually, not retained in Neon. Run CI before deployment and verify live Neon, DOI and rendering separately.
