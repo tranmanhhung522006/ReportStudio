@@ -25,6 +25,19 @@ def font_value(run,p,attr):
     return value
 
 def extract_sample(data):
+    from io import BytesIO
+    from zipfile import ZipFile, ZIP_DEFLATED
+    from engine import MAX_BYTES, MAX_EXPANDED
+    if len(data)>MAX_BYTES: raise ValueError('Template too large.')
+    with ZipFile(BytesIO(data)) as z:
+        if len(z.infolist())>3000 or sum(x.file_size for x in z.infolist())>MAX_EXPANDED or any('vbaproject' in x.filename.lower() for x in z.infolist()): raise ValueError('Unsafe or macro-enabled template.')
+        manifest=z.read('[Content_Types].xml')
+        old=b'application/vnd.openxmlformats-officedocument.wordprocessingml.template.main+xml'
+        if old in manifest:
+            out=BytesIO()
+            with ZipFile(out,'w',ZIP_DEFLATED) as dest:
+                for item in z.infolist(): dest.writestr(item.filename,manifest.replace(old,b'application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml') if item.filename=='[Content_Types].xml' else z.read(item))
+            data=out.getvalue()
     d=load(data); rules={}; evidence={}; warnings=[]
     def put(k,v,why):
         if v is not None: rules[k]=v; evidence[k]=why
