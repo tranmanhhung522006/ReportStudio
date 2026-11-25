@@ -32,7 +32,7 @@ $('export').addEventListener('click',async()=>{
  lock(true);
  try{
   let result=processed.result;
-  if(capabilities.history&&$('saveHistory').checked&&!result.saved){result=await formatted(true);processed={key:previewKey(),result};}
+  if(capabilities.history&&$('saveHistory').checked&&!result.saved){result=await formatted(true);if(result.report.input_sha256!==processed.result.report.input_sha256||result.report.output_sha256!==processed.result.report.output_sha256){status('History copy was regenerated; downloading the verified preview copy instead.');result=processed.result;}else processed={key:previewKey(),result};}
   if(!result.report.integrity?.passed||result.report.change_report?.unchanged)throw Error('No formatting changes detected. Adjust settings and process again.');
   downloadBlob(new Blob([Uint8Array.from(atob(result.document),c=>c.charCodeAt(0))],{type:'application/vnd.openxmlformats-officedocument.wordprocessingml.document'}),name.replace(/\.docx$/i,'')+'_formatted.docx');
   status(result.storage_warning||'Formatted document downloaded.',!!result.storage_warning);if(result.saved)refreshHistory();
@@ -115,7 +115,7 @@ async function loadFullPreview(force=false){
  }catch(e){status(e.message,true);renderPreview();}finally{lock(false);}
 }
 $('settings').addEventListener('change',()=>{resultCache=null;renderPreview();});$('extraSettings').addEventListener('change',()=>{resultCache=null;renderPreview();});$('switches').addEventListener('change',()=>{resultCache=null;renderPreview();});
-async function formatted(save){const payload={filename:name,config:config(),outline:$('outline').value,decisions:Object.fromEntries(rows.map(r=>[r.index,r.level]))};const key=JSON.stringify(payload);if(!save&&resultCache?.key===key)return resultCache.result;const result=await documentRequest('/api/format',{...payload,save_history:save});resultCache={key,result};return result;}
+async function formatted(save){const payload={filename:name,config:config(),outline:$('outline').value,decisions:Object.fromEntries(rows.map(r=>[r.index,r.level]))};const key=JSON.stringify(payload);if(!save&&resultCache?.key===key)return resultCache.result;const result=await request('/api/format',{...payload,document:selectedFile,save_history:save});resultCache={key,result};return result;}
 $('sampleRules').onclick=async()=>{if(busy)return;const file=$('sampleFile').files[0];if(!file)return status('Select a sample DOCX first.',true);lock(true);status('Reading sample formatting…');try{const result=await request('/api/sample',{document:file});suggested=result.rules;const root=$('ruleReview');root.replaceChildren();for(const [k,v] of Object.entries(suggested)){if(!$(k))continue;const l=node('label');const i=node('input');i.type='checkbox';i.checked=true;i.dataset.rule=k;l.append(i,document.createTextNode(k+': '+v),node('small',result.evidence[k]||''));root.append(l);}for(const w of result.warnings)root.append(node('p',w,'muted'));$('applyRules').disabled=!Object.keys(suggested).length;status('Review sample styles, then apply selected rules.');}catch(e){status(e.message,true);}finally{lock(false);}};
 $('references').onclick=async()=>{if(busy||!selectedFile)return;lock(true);status('Checking references…');try{const r=await documentRequest('/api/references',{});const root=$('referenceResult');root.replaceChildren(node('p',r.reference_entries+' reference entries · '+r.duplicate_entries.length+' duplicate candidates · '+r.doi_candidates.length+' DOI candidates'),node('p',r.note,'muted'));for(const t of [...r.duplicate_entries,...r.doi_candidates])root.append(node('div',t,'issue'));status('Reference check complete.');}catch(e){status(e.message,true);}finally{lock(false);}};
 
@@ -175,10 +175,16 @@ $('processDocument').onclick=async()=>{
   const key=previewKey(),r=await formatted(false);
   if(key!==previewKey())throw Error('Settings changed during processing. Apply formatting again.');
   if(!r.report.integrity?.passed)throw Error('Document integrity check failed.');
+  if(!r.report.input_sha256||!r.report.output_sha256)throw Error('Server version is outdated. Deploy the latest commit.');
+  const sha=async bytes=>Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',bytes)),x=>x.toString(16).padStart(2,'0')).join('');
+  const inputHash=await sha(await selectedFile.arrayBuffer());
+  const outputHash=await sha(Uint8Array.from(atob(r.document),c=>c.charCodeAt(0)));
+  if(inputHash!==r.report.input_sha256||outputHash!==r.report.output_sha256)throw Error('Document verification failed. Analyze the original again.');
+  if(inputHash===outputHash)throw Error('The output is identical to the original. No file downloaded.');
   if(r.report.change_report?.unchanged)throw Error('No formatting changes detected. Adjust settings and process again.');
   processed={key,result:r};lastReport=r.report;$('changeReport').disabled=false;
   const report=r.report;const summary=$('outputSummary');summary.replaceChildren();
-  summary.append(node('strong','Formatted document ready'),node('p','Headings: '+report.heading+' · Body paragraphs: '+report.body+' · Tables: '+report.tables),node('p','Image references: '+(report.integrity.image_integrity?.before??0)+' → '+(report.integrity.image_integrity?.after??0)),node('p','Integrity: passed'));
+  summary.append(node('strong','Formatted document ready'),node('p','Headings: '+report.heading+' · Body paragraphs: '+report.body+' · Tables: '+report.tables),node('p','Image references: '+(report.integrity.image_integrity?.before??0)+' → '+(report.integrity.image_integrity?.after??0)),node('p','Integrity: passed'),node('p','Applied: '+report.applied_settings.font+' · '+report.applied_settings.size+' pt · '+report.applied_settings.line+' line spacing'),node('p','Changed parts: '+report.change_report.changed_parts.join(', ')),node('p','Output SHA-256: '+report.output_sha256.slice(0,16)+'…'));
   $('result').textContent=(report.warnings||[]).join('\n');renderAudit(report.audit);showStep(3);status('Formatting complete. Download your new document.');
  }catch(e){status(e.message,true);}finally{lock(false);}
 };
