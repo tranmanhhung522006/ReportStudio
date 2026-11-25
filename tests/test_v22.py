@@ -48,3 +48,25 @@ class V22Tests(unittest.TestCase):
             token=base64.b64encode(b'studio:test-code').decode()
             self.assertEqual(client.get('/',headers={'Authorization':'Basic '+token}).status_code,200)
             self.assertEqual(client.get('/health').status_code,200)
+
+    def test_missing_heading_styles(self):
+        from engine import heading_level
+        d=Document()
+        for n in range(2,10):
+            d.styles[f'Heading {n}'].delete()
+        d.add_paragraph('Introduction')
+        d.add_paragraph('Deep subsection')
+        out,r=advanced(blob(d),{'toc':False},{0:1,1:7})
+        doc=Document(io.BytesIO(out))
+        self.assertEqual(heading_level(doc.paragraphs[1]),7)
+        self.assertEqual(doc.styles['Heading 7']._element.pPr.find(qn('w:outlineLvl')).get(qn('w:val')),'6')
+        self.assertTrue(r['integrity']['passed'])
+    def test_missing_heading_styles_with_cover(self):
+        from engine import heading_level
+        d=Document();d.add_paragraph('Cover')
+        d.add_section(WD_SECTION.NEW_PAGE);d.add_paragraph('Introduction')
+        d.styles['Heading 7'].delete()
+        out,r=advanced(blob(d),{'protect_cover':True,'toc':False},{2:7})
+        doc=Document(io.BytesIO(out))
+        self.assertEqual(doc.paragraphs[0].text,'Cover')
+        self.assertEqual(heading_level(doc.paragraphs[2]),7)
