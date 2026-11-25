@@ -5,6 +5,7 @@ import unicodedata
 from zipfile import ZipFile
 from docx import Document
 from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.enum.style import WD_STYLE_TYPE
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from docx.shared import Cm, Pt
@@ -44,6 +45,13 @@ def heading_level(p):
     if style:
         m=re.fullmatch(r'Heading\s*([1-9])',style.name or '',re.I) or re.fullmatch(r'Heading([1-9])',style.style_id or '',re.I)
         if m: return int(m.group(1))
+        # Custom/localized paragraph styles may carry the native outline level.
+        sp=style._element.pPr
+        if sp is not None:
+            ol=sp.find(qn('w:outlineLvl'))
+            if ol is not None:
+                val=ol.get(qn('w:val'),'9')
+                if val.isdigit() and 0<=int(val)<9: return int(val)+1
     pp=p._p.pPr
     if pp is not None:
         ol=pp.find(qn('w:outlineLvl'))
@@ -114,6 +122,37 @@ def set_font(obj,name,size):
     for k in ('ascii','hAnsi','eastAsia','cs'): fonts.set(qn('w:'+k),name)
     for k in ('asciiTheme','hAnsiTheme','eastAsiaTheme','cstheme','csTheme'): fonts.attrib.pop(qn('w:'+k),None)
 
+
+def ensure_paragraph_style(d, name):
+    """Resolve existing named/built-in paragraph styles; create only if absent."""
+    styles=d.styles
+    canonical=name.replace(' ','').casefold()
+    for style in styles:
+        if style.type==WD_STYLE_TYPE.PARAGRAPH and ((style.name or '').casefold()==name.casefold() or (style.style_id or '').casefold()==canonical):
+            return style
+    # A character/table style can have the same display name. Avoid collisions.
+    used_names={(s.name or '').casefold() for s in styles}
+    used_ids={(s.style_id or '').casefold() for s in styles}
+    candidate=name
+    suffix=1
+    while candidate.casefold() in used_names or candidate.replace(' ','').casefold() in used_ids:
+        candidate=f'ReportStudio {name} {suffix}'
+        suffix+=1
+    style=styles.add_style(candidate, WD_STYLE_TYPE.PARAGRAPH)
+    if name!='Normal':
+        style.base_style=ensure_paragraph_style(d,'Normal')
+    match=re.fullmatch(r'Heading ([1-9])',name)
+    if match:
+        level=int(match.group(1))
+        pp=style._element.get_or_add_pPr()
+        pp.append(el('outlineLvl',val=level-1))
+        style.paragraph_format.keep_with_next=True
+        style.font.bold=True
+        style.next_paragraph_style=ensure_paragraph_style(d,'Normal')
+    elif name=='Normal':
+        style._element.set(qn('w:default'),'1')
+    return style
+
 def native_numbering(d):
     root=d.part.numbering_part.element
     a=max([int(x.get(qn('w:abstractNumId'))) for x in root.findall(qn('w:abstractNum'))]+[-1])+1
@@ -147,7 +186,7 @@ def strip_prefix(p):
 def add_toc(d,first):
     instructions=[x.text or '' for x in d._element.iter(qn('w:instrText'))]+[x.get(qn('w:instr'),'') for x in d._element.iter(qn('w:fldSimple'))]
     if any(re.search(r'\bTOC\b',x,re.I) and not re.search(r'\\c\s',x,re.I) for x in instructions): return False
-    title=first.insert_paragraph_before('Table of Contents'); title.style=d.styles['Normal']; title.runs[0].bold=True
+    title=first.insert_paragraph_before('Table of Contents'); title.style=ensure_paragraph_style(d,'Normal'); title.runs[0].bold=True
     p=first.insert_paragraph_before(); p.add_run()._r.append(el('fldChar',fldCharType='begin'))
     instr=el('instrText'); instr.set(qn('xml:space'),'preserve'); instr.text=' TOC \\o "1-9" \\h \\z \\u '; p.add_run()._r.append(instr)
     p.add_run()._r.append(el('fldChar',fldCharType='separate')); p.add_run('Update this field in Microsoft Word (F9).'); p.add_run()._r.append(el('fldChar',fldCharType='end'))
@@ -167,11 +206,11 @@ def format_doc(data,raw_config,decisions):
         landscape=sec.page_width and sec.page_height and sec.page_width>sec.page_height
         sec.page_width=Cm(29.7 if landscape else 21); sec.page_height=Cm(21 if landscape else 29.7)
         for k in ('left','right','top','bottom'): setattr(sec,k+'_margin',Cm(c[k]))
-    normal=d.styles['Normal']
+    normal=ensure_paragraph_style(d,'Normal')
     if c['format_body'] and not skip: set_font(normal,c['font'],c['size']); normal.paragraph_format.line_spacing=c['line']; normal.paragraph_format.alignment=WD_ALIGN_PARAGRAPH.JUSTIFY
     for level in range(1,10):
         if not c['format_headings'] or skip: continue
-        s=d.styles[f'Heading {level}']; set_font(s,c['font'],c['h'+str(min(level,3))]); s.font.bold=True; s.paragraph_format.keep_with_next=True; s.paragraph_format.space_before=Pt(12); s.paragraph_format.space_after=Pt(6); s.paragraph_format.line_spacing=c['line']; s.paragraph_format.alignment=WD_ALIGN_PARAGRAPH.LEFT
+        s=ensure_paragraph_style(d,f'Heading {level}'); set_font(s,c['font'],c['h'+str(min(level,3))]); s.font.bold=True; s.paragraph_format.keep_with_next=True; s.paragraph_format.space_before=Pt(12); s.paragraph_format.space_after=Pt(6); s.paragraph_format.line_spacing=c['line']; s.paragraph_format.alignment=WD_ALIGN_PARAGRAPH.LEFT
     num=native_numbering(d) if c['numbering'] and c['format_headings'] else None; first=None; previous=0
     for i,p in enumerate(paras):
         if p._p in skip: continue
@@ -189,7 +228,7 @@ def format_doc(data,raw_config,decisions):
             if first is None and old and not unnumbered(p.text): first=p
             continue
         if level:
-            p.style=d.styles[f'Heading {level}']; pp=p._p.get_or_add_pPr(); ol=pp.find(qn('w:outlineLvl'))
+            p.style=ensure_paragraph_style(d,f'Heading {level}'); pp=p._p.get_or_add_pPr(); ol=pp.find(qn('w:outlineLvl'))
             if ol is not None: pp.remove(ol)
             p.alignment=WD_ALIGN_PARAGRAPH.LEFT; p.paragraph_format.line_spacing=c['line']; p.paragraph_format.keep_with_next=True; p.paragraph_format.space_before=Pt(12); p.paragraph_format.space_after=Pt(6)
             for r in p.runs: set_font(r,c['font'],c['h'+str(min(level,3))]); r.bold=True
