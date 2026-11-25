@@ -158,7 +158,7 @@ def advanced(data,raw,decisions,outline=''):
             for r in p.runs:
                 r.bold=c['heading_bold']
                 if lev==1 and c['heading_uppercase']: r.text=r.text.upper()
-        elif not lev and c['format_body'] and p.style.name in ('Normal','Body Text','No Spacing'):
+        elif not lev and c['format_body'] and p.style.name not in ('Title','Subtitle','Caption'):
             p.alignment=align[c['alignment']]; f=p.paragraph_format
             f.space_before=Pt(c['before']); f.space_after=Pt(c['after']); f.first_line_indent=Cm(c['first_indent'])
     if c['tables']:
@@ -214,6 +214,10 @@ def advanced(data,raw,decisions,outline=''):
     report.update(integrity=guard,audit=audit(out,c,outline),captions=dict(counts))
     report['change_report']={k:report.get(k,0) for k in ('heading','body','tables','figures','cleanup_runs','citation_paragraphs_formatted','tables_fitted','images_resized','cover_protected','smart_pages_applied','toc_added')}
     if existing_caption_fields: report['warnings'].append('Existing caption fields preserved; refresh and verify sequence identifiers in Word.')
+    import hashlib
+    report['input_sha256']=hashlib.sha256(data).hexdigest()
+    report['output_sha256']=hashlib.sha256(out).hexdigest()
+    report['applied_settings']={k:c[k] for k in ('font','size','line','h1','h2','h3','left','right','top','bottom','paper','format_body','format_headings','format_layout','protect_cover')}
     changed=changed_document_parts(data,out)
     report['change_report']['unchanged']=not changed
     report['change_report']['changed_parts']=changed
