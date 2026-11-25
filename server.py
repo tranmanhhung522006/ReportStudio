@@ -6,6 +6,7 @@ from engine import analyze, MAX_BYTES
 from advanced import advanced, audit, pdf_export, settings
 from requirement_parser import extract_text, parse_rules, ai_rules
 from inspection import extract_sample, preview, reference_audit
+from document_preview import full_preview
 ROOT=Path(__file__).resolve().parent/'web'
 class Handler(BaseHTTPRequestHandler):
     def send(self, code, data, content_type='application/json; charset=utf-8'):
@@ -33,7 +34,7 @@ class Handler(BaseHTTPRequestHandler):
             if self.path=='/api/analyze':
                 result=analyze(data,req.get('outline','')); result['preview']=preview(data,req.get('outline','')); self.send(200,result)
             elif self.path=='/api/sample': self.send(200,extract_sample(data))
-            elif self.path=='/api/preview': self.send(200,preview(data,req.get('outline','')))
+            elif self.path=='/api/preview': self.send(200,full_preview(data))
             elif self.path=='/api/references': self.send(200,reference_audit(data))
             elif self.path=='/api/audit': self.send(200,audit(data,req.get('config',{}),req.get('outline','')))
             elif self.path=='/api/pdf': self.send(200,{'pdf':base64.b64encode(pdf_export(data)).decode()})
