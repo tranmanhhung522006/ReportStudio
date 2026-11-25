@@ -55,9 +55,79 @@ def compare_images(before,after):
             'external':sum(v for k,v in a.items() if k[1]=='external'),
             'unresolved_original':sum(v for k,v in a.items() if k[1]=='missing')}
 
+
+HIGHLIGHTS={'yellow':'#ffff00','green':'#00ff00','cyan':'#00ffff','magenta':'#ff00ff','blue':'#0000ff','red':'#ff0000','darkBlue':'#000080','darkCyan':'#008080','darkGreen':'#008000','darkMagenta':'#800080','darkRed':'#800000','darkYellow':'#808000','darkGray':'#808080','lightGray':'#c0c0c0','black':'#000000','white':'#ffffff'}
+def child_val(node,tag,default=None):
+    child=node.find(qn('w:'+tag)) if node is not None else None
+    return child.get(qn('w:val'),default) if child is not None else default
+
+def numeric(value,default=0):
+    try: return float(value)
+    except (TypeError,ValueError): return default
+
+def style_chain(style):
+    seen=set()
+    while style is not None and style.style_id not in seen:
+        seen.add(style.style_id)
+        yield style
+        style=style.base_style
+
+def numbering_preview(d):
+    """Render common native numbering without changing the document."""
+    try: root=d.part.numbering_part.element
+    except (KeyError,NotImplementedError): return lambda p: ''
+    abstract={x.get(qn('w:abstractNumId')):x for x in root.findall(qn('w:abstractNum'))}
+    nums={x.get(qn('w:numId')):x for x in root.findall(qn('w:num'))}
+    counters={}
+    def level_for(num,level):
+        for override in num.findall(qn('w:lvlOverride')):
+            if override.get(qn('w:ilvl'))==str(level):
+                embedded=override.find(qn('w:lvl'))
+                if embedded is not None:return embedded,child_val(override,'startOverride')
+        ab=abstract.get(child_val(num,'abstractNumId'))
+        if ab is None:return None,None
+        base=next((x for x in ab.findall(qn('w:lvl')) if x.get(qn('w:ilvl'))==str(level)),None)
+        override=next((x for x in num.findall(qn('w:lvlOverride')) if x.get(qn('w:ilvl'))==str(level)),None)
+        return base,child_val(override,'startOverride')
+    def fmt(n,kind):
+        if kind in ('upperRoman','lowerRoman'):
+            if not 0<n<4000:return str(n)
+            out=''
+            for k,v in [(1000,'M'),(900,'CM'),(500,'D'),(400,'CD'),(100,'C'),(90,'XC'),(50,'L'),(40,'XL'),(10,'X'),(9,'IX'),(5,'V'),(4,'IV'),(1,'I')]:
+                q,n=divmod(n,k);out+=v*q
+            return out if kind=='upperRoman' else out.lower()
+        if kind in ('upperLetter','lowerLetter') and 0<n<=702:
+            out=''
+            while n:n,r=divmod(n-1,26);out=chr(65+r)+out
+            return out if kind=='upperLetter' else out.lower()
+        return str(n)
+    def marker(p):
+        props=[p._p.pPr]+[st._element.pPr for st in style_chain(p.style)]
+        numid=next((child_val(np,'numId') for pp in props if pp is not None for np in [pp.find(qn('w:numPr'))] if np is not None and child_val(np,'numId') is not None),None)
+        if not numid or numid=='0' or numid not in nums:return ''
+        level=int(numeric(next((child_val(np,'ilvl') for pp in props if pp is not None for np in [pp.find(qn('w:numPr'))] if np is not None and child_val(np,'ilvl') is not None),'0')))
+        if not 0<=level<=8:return ''
+        num=nums[numid];lv,start=level_for(num,level)
+        if lv is None:return ''
+        kind=child_val(lv,'numFmt','decimal')
+        if kind=='none':return ''
+        if kind=='bullet':return '•'
+        state=counters.setdefault(numid,{})
+        for i in list(state):
+            if i>level:state.pop(i)
+        for i in range(level+1):
+            other,override=level_for(num,i)
+            initial=int(numeric(override or child_val(other,'start','1'),1))
+            if i not in state:state[i]=initial
+            elif i==level:state[i]+=1
+        text=child_val(lv,'lvlText','%'+str(level+1)+'.')
+        return re.sub(r'%([1-9])',lambda m:fmt(state.get(int(m.group(1))-1,1),child_val(level_for(num,int(m.group(1))-1)[0],'numFmt','decimal')),text)
+    return marker
+
 def full_preview(data):
     """No 300-paragraph truncation. Return body blocks, not untrusted HTML."""
     d=load(data); assets={}; used=0; warnings=set(); image_count=0
+    marker=numbering_preview(d)
     def image_ref(rid,owner,holder):
         nonlocal used,image_count
         image_count+=1
@@ -115,6 +185,10 @@ def full_preview(data):
                         for tag,key in [('b','bold'),('i','italic'),('u','underline')]:
                             setting=rp.find(qn('w:'+tag))
                             if setting is not None: t[key]=setting.get(qn('w:val'),'1') not in ('0','false','none','off')
+                        color=child_val(rp,'color')
+                        if color and re.fullmatch(r'[0-9a-fA-F]{6}',color):t['color']='#'+color
+                        highlight=child_val(rp,'highlight')
+                        if highlight in HIGHLIGHTS:t['highlight']=HIGHLIGHTS[highlight]
                         size=rp.find(qn('w:sz'))
                         if size is not None:
                             try: t['size']=float(size.get(qn('w:val')))/2
@@ -136,10 +210,20 @@ def full_preview(data):
                 b={'kind':'paragraph','level':heading_level(p),'segments':value(n,owner),
                    'alignment':{0:'left',1:'center',2:'right',3:'justify'}.get(align,'left'),
                    'page_break':bool(f.page_break_before)}
+                b['number']=marker(p)
+                props=[p._p.pPr]+[style._element.pPr for style in style_chain(st)]
+                for key,tag,attr,scale in [('left_indent','ind','left',20),('right_indent','ind','right',20),('first_indent','ind','firstLine',20),('before','spacing','before',20),('after','spacing','after',20)]:
+                    for pp in props:
+                        element=pp.find(qn('w:'+tag)) if pp is not None else None
+                        if element is None:continue
+                        raw=element.get(qn('w:'+attr))
+                        if key=='first_indent' and raw is None and element.get(qn('w:hanging')) is not None:raw=-numeric(element.get(qn('w:hanging')))
+                        if raw is not None:b[key]=numeric(raw)/scale;break
                 if isinstance(line,float): b['line']=line
-                if st is not None:
-                    if st.font.name: b['font']=st.font.name
-                    if st.font.size: b['size']=st.font.size.pt
+                for style in style_chain(st):
+                    if 'font' not in b and style.font.name:b['font']=style.font.name
+                    if 'size' not in b and style.font.size:b['size']=style.font.size.pt
+                    if 'bold' not in b and style.font.bold is not None:b['bold']=style.font.bold
                 out.append(b)
             elif tag=='tbl':
                 rows=[]
