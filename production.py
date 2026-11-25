@@ -87,7 +87,7 @@ def headers(response):
     response.headers['Referrer-Policy']='no-referrer'
     response.headers['X-Frame-Options']='DENY'
     response.headers['Permissions-Policy']='camera=(), microphone=(), geolocation=()'
-    response.headers['Content-Security-Policy']="default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; frame-src blob:; frame-ancestors 'none'; base-uri 'none'; object-src 'none'"
+    response.headers['Content-Security-Policy']="default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data: blob:; frame-src blob:; frame-ancestors 'none'; base-uri 'none'; object-src 'none'"
     return response
 
 @app.errorhandler(HTTPException)
