@@ -11,17 +11,21 @@ def most(values):
 def inherited(p, attr):
     value=getattr(p.paragraph_format,attr)
     style=p.style
-    while value is None and style is not None:
+    seen=set()
+    while value is None and style is not None and style.style_id not in seen:
+        seen.add(style.style_id)
         value=getattr(style.paragraph_format,attr)
         style=style.base_style
     return value
 
 def font_value(run,p,attr):
     value=getattr(run.font,attr)
-    style=p.style
-    while value is None and style is not None:
-        value=getattr(style.font,attr)
-        style=style.base_style
+    for style in (run.style,p.style):
+        seen=set()
+        while value is None and style is not None and style.style_id not in seen:
+            seen.add(style.style_id)
+            value=getattr(style.font,attr)
+            style=style.base_style
     return value
 
 def extract_sample(data):
@@ -42,12 +46,14 @@ def extract_sample(data):
     def put(k,v,why):
         if v is not None: rules[k]=v; evidence[k]=why
     body=[p for p in d.paragraphs if p.text.strip() and not heading_level(p) and p.style.name in ('Normal','Body Text','No Spacing')]
+    if not body:
+        body=[p for p in d.paragraphs if len(p.text.split())>=15 and not heading_level(p) and not protected(p) and p.style.name not in ('Title','Subtitle','Caption')]
     put('font',most(font_value(r,p,'name') for p in body for r in p.runs if r.text.strip()),'Most common body font')
     for level,key in [(0,'size'),(1,'h1'),(2,'h2'),(3,'h3')]:
         paras=body if not level else [p for p in d.paragraphs if heading_level(p)==level]
         sizes=[font_value(r,p,'size') for p in paras for r in p.runs if r.text.strip()]
         v=most(x.pt for x in sizes if x is not None)
-        put(key,v,'Most common visible font size in sample')
+        if v is not None and 8<=v<=40: put(key,v,'Most common visible font size in sample')
     spacing=most(inherited(p,'line_spacing') for p in body)
     if isinstance(spacing,float) and 1<=spacing<=3: put('line',spacing,'Most common body line spacing')
     for attr,key in [('space_before','before'),('space_after','after'),('first_line_indent','first_indent')]:
@@ -57,6 +63,39 @@ def extract_sample(data):
             if 0<=val<=(3 if key=='first_indent' else 72): put(key,val,'Most common body paragraph setting')
     align=most(inherited(p,'alignment') for p in body)
     if align in (0,1,3): put('alignment',{0:'left',1:'center',3:'justify'}[int(align)],'Most common body alignment')
+    captions=[p for p in d.paragraphs if p.text.strip() and (p.style.name=='Caption' or re.match(r'^\s*(?:figure|table|hình|bảng)\s+\d',p.text,re.I))]
+    heads=[p for p in d.paragraphs if p.text.strip() and heading_level(p)]
+    table_paras=[]
+    seen=set()
+    for t in d.tables:
+        for row in t.rows:
+            for cell in row.cells:
+                if cell._tc in seen:continue
+                seen.add(cell._tc)
+                table_paras.extend(p for p in cell.paragraphs if p.text.strip())
+    for group,paras in [('body',body),('heading',heads),('caption',captions),('table',table_paras)]:
+        pairs=[(r,p) for p in paras if not protected(p) for r in p.runs if r.text.strip()]
+        if group in ('caption','table'):
+            sizes=[font_value(r,p,'size') for r,p in pairs]
+            v=most(x.pt for x in sizes if x is not None)
+            if v is not None and 8<=v<=40:put(group+'_size',v,'Most common sample '+group+' font size')
+        for attr in ('bold','italic','underline'):
+            values=[font_value(r,p,attr) for r,p in pairs]
+            known=[bool(v) for v in values if v is not None]
+            if not known:continue
+            # Mixed or uncertain formatting should not erase deliberate emphasis.
+            if len(known)==len(values) and len(set(known))==1:
+                mode='on' if known[0] else 'off'
+            else:mode='preserve'
+            put(group+'_'+attr+'_mode',mode,'Uniform explicit style or preserve mixed emphasis in sample')
+        colors=[]
+        for r,p in pairs:
+            # Explicit RGB only; avoid guessing unresolved theme colors.
+            color=r.font.color
+            rgb=color.rgb if color.type is not None and color.theme_color is None else None
+            if rgb is not None:colors.append('#'+str(rgb))
+        if colors and len(colors)==len(pairs):
+            put(group+'_color',colors[0] if len(set(colors))==1 else 'preserve','Explicit sample text colors')
     if d.sections:
         sec=d.sections[0]
         for k in ('left','right','top','bottom'):
@@ -67,7 +106,7 @@ def extract_sample(data):
             for name,expected in [('A4',(21,29.7)),('A5',(14.8,21)),('Letter',(21.59,27.94))]:
                 if all(abs(x-y)<.12 for x,y in zip(dims,expected)): put('paper',name,'First section paper size')
         if len(d.sections)>1: warnings.append('Sample contains multiple sections. Only first-section page layout is suggested.')
-    if not body: warnings.append('No standard body paragraphs detected; some settings could not be inferred.')
+    if not body: warnings.append('No reliable body paragraphs detected; some settings could not be inferred.')
     warnings.append('Sample extraction suggests common styles only. Review exceptions and heading levels.')
     return dict(rules=rules,evidence=evidence,warnings=warnings,mode='sample')
 
