@@ -93,13 +93,107 @@ def parse_outline(text):
         if m: result[norm(s[m.end():])]=level
     return result
 
+def heading_features(p):
+    from collections import Counter
+    runs=[r for r in p.runs if r.text.strip()]
+    def effective(r,attr):
+        value=getattr(r.font,attr)
+        if value is not None:return value
+        for st in (r.style,p.style):
+            seen=set()
+            while st is not None and st.style_id not in seen:
+                seen.add(st.style_id)
+                v=getattr(st.font,attr)
+                if v is not None:return v
+                st=st.base_style
+        return None
+    sizes=Counter()
+    for r in runs:
+        v=effective(r,'size')
+        if v is not None:sizes[round(v.pt,1)]+=len(r.text)
+    size=sizes.most_common(1)[0][0] if sizes else None
+    bold=bool(runs) and all(effective(r,'bold') is True for r in runs)
+    f=p.paragraph_format
+    before=f.space_before
+    if before is None and p.style:before=p.style.paragraph_format.space_before
+    keep=f.keep_with_next
+    if keep is None and p.style:keep=p.style.paragraph_format.keep_with_next
+    return {'size':size,'bold':bold,'space_before':round(before.pt,1) if before is not None else 0,'keep_next':bool(keep),'style':p.style.name if p.style else ''}
+
+STANDALONE_CHAPTER=re.compile(r'^\s*(?:chapter|chương|phần|part)\s+(?:\d+|[IVXLCDM]+)\s*[:.\-–]?\s*$',re.I)
+CASE_TITLE=re.compile(r'^(?:case(?:\s+study)?|tình huống)\s*(?:\d+)?\s*:\s*\S',re.I)
+QUESTION=re.compile(r'^(?:ans(?:wer)?\s*\d*\s*:|question\s*\d*\s*:|câu\s*hỏi\s*\d*\s*:|trả lời\s*:|what\b|why\b|how\b|when\b|where\b|which\b|who\b|describe\b|explain\b|discuss\b|analy[sz]e\b|compare\b|identify\b|list\b|tại sao\b|vì sao\b|hãy\b)',re.I)
+CAPTION_LIKE=re.compile(r'^(?:fig(?:ure)?\.?|table|hình|bảng|biểu đồ|chart)\s+\d+(?:[.\-]\d+)*(?:\s|[:.\-–]|$)',re.I)
+
 def analyze(data,outline_text=''):
+    from collections import Counter
     d=load(data); outline=parse_outline(outline_text); rows=[]
-    for i,p in enumerate(d.paragraphs):
-        level,reason,confidence=recognize(p,outline)
-        if p.text.strip():
-            rows.append(dict(index=i,text=p.text[:350],level=level,reason=reason,confidence=confidence,protected=protected(p),unnumbered=unnumbered(p.text)))
-    return dict(rows=rows,paragraphs=len(d.paragraphs),tables=len(d.tables),sections=len(d.sections),headings=sum(r['level']>0 for r in rows),protected=sum(r['protected'] for r in rows))
+    paras=list(d.paragraphs); features=[heading_features(p) if p.text.strip() else {} for p in paras]
+    sizes=Counter()
+    for p,f in zip(paras,features):
+        if len(p.text.split())>=18 and not heading_level(p) and f.get('size'):
+            sizes[f['size']]+=len(p.text)
+    baseline=sizes.most_common(1)[0][0] if sizes else None
+    signatures=Counter((f.get('style'),f.get('size'),f.get('bold')) for p,f in zip(paras,features)
+        if f and 2<=len(p.text.split())<=14 and not p.text.strip().endswith(('.', '?','!')) and f.get('bold'))
+    previous=0
+    for i,p in enumerate(paras):
+        t=p.text.strip()
+        if not t:continue
+        f=features[i];old=heading_level(p);m=prefix(t)
+        title=(t[m.end():] if m else t).strip();key=norm(title)
+        explicit=outline.get(norm(t),outline.get(key))
+        isprotected=protected(p)
+        candidate=0;confidence='';reason='Body text'
+        native_list=bool((p._p.pPr is not None and p._p.pPr.numPr is not None) or 'list' in f['style'].lower())
+        toc_style=bool(re.match(r'^(toc|table of figures|mục lục|danh mục hình|danh mục bảng)\s*\d*$',f['style'],re.I))
+        large=bool(baseline and f['size'] and f['size']>=baseline+1.5)
+        distinctive=large or f['bold'] or f['keep_next'] or f['space_before']>=10
+        repeated=signatures[(f['style'],f['size'],f['bold'])]>=3
+        if isprotected:
+            candidate=old;confidence='high' if old else '';reason='Protected Word content'
+        elif explicit is not None:
+            candidate=explicit;confidence='high';reason='Reference outline match'
+        elif toc_style or CAPTION_LIKE.match(t) or f['style'] in ('Title','Subtitle','Caption'):
+            reason='Caption, title or generated index'
+        elif old:
+            candidate=old;confidence='high';reason='Existing Word heading'
+        elif STANDALONE_CHAPTER.fullmatch(t) or CHAPTER.match(t):
+            candidate=1;confidence='high';reason='Explicit chapter label'
+        elif unnumbered(t):
+            candidate=1;confidence='high';reason='Recognized unnumbered section'
+        elif native_list:
+            reason='Native list item'
+        elif QUESTION.match(title) or t.endswith('?') or len(t)>200 or len(t.split())>18:
+            reason='Question, answer or body sentence'
+        elif CASE_TITLE.match(title):
+            candidate=2 if previous else 1;confidence='high' if previous and distinctive else 'medium';reason='Case study title'
+        elif m and (key in MAJOR or key in MINOR):
+            candidate=min(9,len(m.group(1).split('.')));confidence='high';reason='Numbered known section'
+        elif key in MAJOR or key in MINOR:
+            candidate=1 if key in MAJOR else 2;confidence='high' if distinctive else 'medium';reason='Known academic section'
+        elif m and not t.endswith(('.', '!', '?')):
+            candidate=min(9,len(m.group(1).split('.')))
+            confidence='high' if candidate>=2 and distinctive and candidate<=previous+1 else 'medium' if distinctive else 'low'
+            reason='Numbered title with formatting evidence' if distinctive else 'Ambiguous numbered paragraph'
+        elif distinctive and not t.endswith(('.', '!', '?')) and len(t.split())<=14:
+            candidate=1 if large and baseline and f['size']>=baseline+3 else min(3,max(2,previous))
+            confidence='medium' if large or (f['bold'] and repeated and (f['keep_next'] or f['space_before']>=10)) else 'low'
+            reason='Larger text or repeated heading format' if confidence=='medium' else 'Short emphasized text; review'
+        # Only apply high-confidence new headings automatically. Keep existing headings.
+        level=candidate if confidence=='high' else 0
+        warning=''
+        if candidate and not unnumbered(t) and candidate>previous+1:
+            warning='Heading level jumps over a parent'
+            if not old and explicit is None and confidence=='high' and not isprotected:
+                confidence='medium';level=0
+        if level and not unnumbered(t):previous=level
+        rows.append(dict(index=i,text=p.text[:350],level=level,suggested_level=candidate,original_level=old,
+                         reason=reason,confidence=confidence,protected=isprotected,unnumbered=unnumbered(t),
+                         warning=warning,features=f,format_group='|'.join(str(f.get(k,'')) for k in ('style','size','bold','space_before','keep_next'))))
+    return dict(rows=rows,paragraphs=len(paras),tables=len(d.tables),sections=len(d.sections),
+                headings=sum(r['level']>0 for r in rows),protected=sum(r['protected'] for r in rows),
+                needs_review=sum(r['suggested_level']>0 and r['confidence']!='high' for r in rows),body_font_size=baseline)
 
 def config(raw):
     c={**DEFAULT,**{k:v for k,v in raw.items() if k in DEFAULT}}
