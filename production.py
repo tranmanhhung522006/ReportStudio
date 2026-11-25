@@ -13,6 +13,7 @@ from upload_cache import UploadCache, UploadExpired
 from doi_check import check_many
 uploads=UploadCache()
 from inspection import extract_sample, preview, reference_audit
+from document_preview import full_preview
 from zipfile import BadZipFile
 from docx.opc.exceptions import PackageNotFoundError
 
@@ -187,7 +188,7 @@ def process(action):
         if action=='pdf' and not PDF_ENABLED: return error('PDF conversion is disabled on this server.',403)
         data=doc()
         if action=='sample': return jsonify(extract_sample(data))
-        if action=='preview': return jsonify(preview(data,req.get('outline','')))
+        if action=='preview': return jsonify(full_preview(data))
         if action=='references': return jsonify(reference_audit(data))
         if action=='analyze':
             result=analyze(data,req.get('outline','')); result['preview']=preview(data,req.get('outline',''))
