@@ -110,12 +110,22 @@ def field(p,instruction,placeholder='1'):
     p.add_run()._r.append(el('fldChar',fldCharType='separate')); p.add_run(placeholder); p.add_run()._r.append(el('fldChar',fldCharType='end'))
 
 CAP=re.compile(r'^\s*(Figure|Table|Hình|Bảng)\s+(\d+(?:[.\-]\d+)*)\s*[:.\-–]\s+(.+)$',re.I)
+def changed_document_parts(before,after):
+    # ZIP timestamps and document metadata do not count as formatting changes.
+    def parts(data):
+        result={}
+        with ZipFile(io.BytesIO(data)) as z:
+            for name in z.namelist():
+                if not re.fullmatch(r'word/(?:document|styles|numbering|settings|header\d+|footer\d+)\.xml',name): continue
+                root=etree.fromstring(z.read(name),parser=etree.XMLParser(resolve_entities=False,no_network=True,remove_blank_text=True))
+                result[name]=etree.tostring(root,method='c14n',exclusive=True)
+        return result
+    a,b=parts(before),parts(after)
+    return sorted(k for k in a.keys()|b.keys() if a.get(k)!=b.get(k))
+
 def advanced(data,raw,decisions,outline=''):
     c=settings(raw); basic,report=format_doc(data,c,decisions); d=load(basic)
     skip=cover_elements(d,c['protect_cover'])
-    if c['protect_cover'] and not skip:
-        report.update(integrity=integrity(data,data),audit=audit(data,c,outline),captions={},change_report={'unchanged':True})
-        return data,report
     paper={'A4':(21,29.7),'A5':(14.8,21),'Letter':(21.59,27.94)}[c['paper']]
     align={'left':WD_ALIGN_PARAGRAPH.LEFT,'center':WD_ALIGN_PARAGRAPH.CENTER,'justify':WD_ALIGN_PARAGRAPH.JUSTIFY,'right':WD_ALIGN_PARAGRAPH.RIGHT}
     for i,s in enumerate(d.sections):
@@ -204,6 +214,10 @@ def advanced(data,raw,decisions,outline=''):
     report.update(integrity=guard,audit=audit(out,c,outline),captions=dict(counts))
     report['change_report']={k:report.get(k,0) for k in ('heading','body','tables','figures','cleanup_runs','citation_paragraphs_formatted','tables_fitted','images_resized','cover_protected','smart_pages_applied','toc_added')}
     if existing_caption_fields: report['warnings'].append('Existing caption fields preserved; refresh and verify sequence identifiers in Word.')
+    changed=changed_document_parts(data,out)
+    report['change_report']['unchanged']=not changed
+    report['change_report']['changed_parts']=changed
+    if not changed: report['warnings'].append('No document formatting changes were detected. The original document may already match your settings.')
     return out,report
 
 def pdf_export(data):
