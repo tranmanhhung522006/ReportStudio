@@ -248,6 +248,7 @@ def format_doc(data,raw_config,decisions):
         if level:
             p.style=ensure_paragraph_style(d,f'Heading {level}'); pp=p._p.get_or_add_pPr(); ol=pp.find(qn('w:outlineLvl'))
             if ol is not None: pp.remove(ol)
+            p.paragraph_format.left_indent=Cm(0); p.paragraph_format.right_indent=Cm(0); p.paragraph_format.first_line_indent=Cm(0)
             p.alignment=WD_ALIGN_PARAGRAPH.LEFT; p.paragraph_format.line_spacing=c['line']; p.paragraph_format.keep_with_next=True; p.paragraph_format.space_before=Pt(12); p.paragraph_format.space_after=Pt(6)
             for r in p.runs: set_font(r,c['font'],c['h'+str(min(level,3))]); r.bold=True
             if level>previous+1 and not unnumbered(p.text): warnings.append(f'Paragraph {i+1}: heading jumps from level {previous} to {level}.')
@@ -272,6 +273,8 @@ def format_doc(data,raw_config,decisions):
             elif not old or i in chosen:
                 if not c['format_body']: continue
                 if p.style and p.style.name in ('Title','Subtitle'): continue
+                if p._p.pPr is not None and p._p.pPr.numPr is None:
+                    p.paragraph_format.left_indent=Cm(0); p.paragraph_format.right_indent=Cm(0)
                 p.alignment=WD_ALIGN_PARAGRAPH.JUSTIFY; p.paragraph_format.line_spacing=c['line']; changes['body']+=1
             else: continue
             for r in p.runs:
