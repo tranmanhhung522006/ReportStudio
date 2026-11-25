@@ -20,7 +20,7 @@ UNNUMBERED = set('abstract|acknowledgements|acknowledgments|references|bibliogra
 MAJOR = set('introduction|literature review|research methodology|methodology|results|discussion|results and discussion|conclusion|conclusions|recommendations|system design|implementation|testing and evaluation|requirement analysis|giới thiệu|tổng quan|phương pháp nghiên cứu|kết quả|thảo luận|kết luận'.split('|'))
 MINOR = set('research background|research objectives|research questions|theoretical framework|hypothesis development|data collection|sampling method|research design|data analysis|research gap|scope of study|problem statement|significance of study|bối cảnh nghiên cứu|mục tiêu nghiên cứu|câu hỏi nghiên cứu|phương pháp thu thập dữ liệu'.split('|'))
 CAPTION = re.compile(r'^\s*(?:figure|table|hình|bảng)\s+\d+(?:[.\-]\d+)*\s*[:.\-–]\s+\S',re.I)
-PROTECTED = set('fldChar fldSimple instrText sdt ins del oMath oMathPara hyperlink footnoteReference endnoteReference drawing pict object bookmarkStart bookmarkEnd commentRangeStart commentRangeEnd'.split())
+PROTECTED = set('fldChar fldSimple instrText sdt ins del oMath oMathPara hyperlink footnoteReference endnoteReference drawing pict object AlternateContent imagedata blip svgBlip shape image graphic textbox txbxContent bookmarkStart bookmarkEnd commentRangeStart commentRangeEnd'.split())
 
 def load(data):
     if len(data)>MAX_BYTES: raise ValueError('Maximum document size: 15 MB.')
