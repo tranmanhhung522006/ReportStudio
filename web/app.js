@@ -6,6 +6,16 @@ const switches=[['numbering','Native multilevel numbering',true],['toc','Insert 
 switches.push(['caption_numbers','Number existing captions',true],['figure_list','List of figures',true],['table_list','List of tables',true],['page_numbers','Page numbers',true],['update_fields','Request field refresh',true],['heading_uppercase','Uppercase chapter headings',false],['heading_bold','Bold headings',true]);
 switches.push(['format_body','Format body text',true],['format_headings','Format headings',true],['format_layout','Format page layout',true],['protect_cover','Protect cover section',false],['cleanup_text','Clean repeated spaces',false],['format_citations','Align citation paragraphs safely',false],['table_fit','Fit oversized tables',false],['image_resize','Resize oversized inline images',false],['smart_pages','Smart page numbering (3 sections)',false]);
 const enums=[['paper','Paper size',['A4','A5','Letter']],['alignment','Body alignment',['justify','left','center']],['numbering_style','Heading numbering',['decimal','chapter','roman']],['language','Caption language',['en','vi']],['page_position','Page number position',['center','right','left']],['page_format','Page number style',['decimal','lowerRoman','upperRoman']],['reference_style','Reference style',['none','APA','Harvard','IEEE']]];
+const typographyGroups=[['body','Body text'],['heading','Headings'],['caption','Captions'],['table','Table text']];
+const typographyDefaults={};
+for(const [group,label] of typographyGroups){
+ fields.push([group+'_color',label+' color','#000000']);
+ typographyDefaults[group+'_color']='#000000';
+ for(const [attr,title] of [['bold','Bold'],['italic','Italic'],['underline','Underline']]){
+  const key=group+'_'+attr+'_mode',initial=group==='heading'?(attr==='bold'?'on':'off'):'preserve';
+  enums.push([key,title,['preserve','on','off']]);typographyDefaults[key]=initial;
+ }
+}
 let capabilities={history:false,pdf:false,ai:false,multipart:false,inspection:false};
 let uploadId=null, lastReport=null, batchEntries=[], compareMode=false;
 let originalFull=null, formattedFull=null, previewUrls=[], previewEpoch=0;
@@ -14,9 +24,26 @@ let selectedFile=null, previewBlocks=[], undoStack=[], redoStack=[], proposed=tr
 let documentData='', name='', rows=[], all=false, busy=false, generation=0;
 function node(tag,text,cls){const e=document.createElement(tag);if(text!==undefined)e.textContent=text;if(cls)e.className=cls;return e;}
 const grid=node('div',undefined,'fieldgrid');$('settings').append(grid);const extra=node('div',undefined,'fieldgrid');$('extraSettings').append(extra);
-for(const [key,label,value] of fields){const l=node('label',label,key==='font'?'wide':'');const i=node('input');i.id=key;i.value=value;if(typeof value==='number'){i.type='number';i.step='0.1';}l.append(i);(['font','size','line','h1','h2','h3','left','right','top','bottom'].includes(key)?grid:extra).append(l);}
+for(const [key,label,value] of fields){if(key.endsWith('_color'))continue;const l=node('label',label,key==='font'?'wide':'');const i=node('input');i.id=key;i.value=value;if(typeof value==='number'){i.type='number';i.step='0.1';}l.append(i);(['font','size','line','h1','h2','h3','left','right','top','bottom'].includes(key)?grid:extra).append(l);}
 for(const [key,label,value] of switches){const l=node('label');const i=node('input');i.type='checkbox';i.id=key;i.checked=value;l.append(i,document.createTextNode(label));$('switches').append(l);}
-for(const [key,label,values] of enums){const l=node('label',label);const i=node('select');i.id=key;for(const v of values){const o=node('option',v);o.value=v;i.append(o);}l.append(i);extra.append(l);}
+for(const [key,label,values] of enums){if(key.endsWith('_mode'))continue;const l=node('label',label);const i=node('select');i.id=key;for(const v of values){const o=node('option',v);o.value=v;i.append(o);}l.append(i);extra.append(l);}
+for(const [group,label] of typographyGroups){
+ const card=node('div',undefined,'type-card');card.append(node('h3',label));
+ const example=node('div','Aa — Sample text','type-example');card.append(example);
+ const controls=node('div',undefined,'type-controls');
+ for(const [attr,title] of [['bold','Bold'],['italic','Italic'],['underline','Underline']]){
+  const key=group+'_'+attr+'_mode',l=node('label',title),select=node('select');select.id=key;
+  for(const [v,t] of [['preserve','Keep'],['on','On'],['off','Off']]){const o=node('option',t);o.value=v;select.append(o);}
+  select.value=typographyDefaults[key];l.append(select);controls.append(l);
+ }
+ const colorLabel=node('label','Text color'),input=node('input');input.id=group+'_color';input.value='#000000';input.placeholder='#000000 or preserve';input.maxLength=8;
+ const picker=node('input');picker.type='color';picker.value='#000000';picker.setAttribute('aria-label',label+' color picker');
+ const keep=node('button','Keep original','secondary');keep.type='button';keep.onclick=()=>{input.value='preserve';input.dispatchEvent(new Event('change',{bubbles:true}));};
+ picker.oninput=()=>{input.value=picker.value;input.dispatchEvent(new Event('change',{bubbles:true}));};
+ const colorRow=node('div',undefined,'type-color');colorRow.append(picker,input,keep);colorLabel.append(colorRow);card.append(controls,colorLabel);
+ const update=()=>{const color=input.value.trim();if(/^#[0-9a-f]{6}$/i.test(color)){picker.value=color;example.style.color=color;}else example.style.color='';example.style.fontWeight=$(group+'_bold_mode').value==='on'?'700':'400';example.style.fontStyle=$(group+'_italic_mode').value==='on'?'italic':'normal';example.style.textDecoration=$(group+'_underline_mode').value==='on'?'underline':'none';};
+ card.addEventListener('change',update);card.addEventListener('input',update);$('typography').append(card);update();
+}
 function config(){return Object.fromEntries([...fields.map(([k,,v])=>[k,typeof v==='number'?Number($(k).value):$(k).value]),...switches.map(([k])=>[k,$(k).checked]),...enums.map(([k])=>[k,$(k).value])]);}
 function status(msg,error=false){$('status').textContent=msg;$('status').hidden=false;$('status').className='status'+(error?' error':'');}
 function lock(v){busy=v;$('refreshPreview').disabled=v||!selectedFile;document.body.classList.toggle('busy',v);$('batchRun').disabled=v;$('batchFiles').disabled=v;$('doiVerify').disabled=v||!selectedFile||!capabilities.doi;$('file').disabled=v;$('analyze').disabled=v;$('export').disabled=v||!processed||processed.key!==previewKey();$('processDocument').disabled=v||!selectedFile;document.querySelectorAll('[data-step],[data-go]').forEach(b=>b.disabled=v);$('showAll').disabled=v||!selectedFile;for(const id of ['audit','preview','downloadPdf'])$(id).disabled=v||!documentData;for(const id of ['parseRules','aiRules','reqFile','sampleFile','sampleRules'])$(id).disabled=v; $('aiRules').disabled=v||!capabilities.ai; for(const id of ['preview','downloadPdf'])$(id).disabled=v||!documentData||!capabilities.pdf;$('references').disabled=v||!selectedFile||!capabilities.inspection;$('sampleRules').disabled=v||!capabilities.inspection;}
@@ -55,7 +82,7 @@ async function refreshHistory(){if(!capabilities.history)return;const root=$('hi
 $('refreshHistory').onclick=refreshHistory;
 (async()=>{try{const r=await fetch('/api/capabilities');if(r.ok)capabilities=await r.json();}catch{}$('doiVerify').hidden=!capabilities.doi;$('historyPanel').hidden=wizardStep!==5||!capabilities.history;$('historyNav').hidden=!capabilities.history;$('pdfActions').hidden=!capabilities.pdf;$('aiRules').hidden=!capabilities.ai;$('aiConsentLabel').hidden=!capabilities.ai;$('retentionLabel').hidden=!capabilities.history;$('aiConsent').disabled=!capabilities.ai;lock(false);refreshHistory();})();
 
-function setConfig(c){for(const [k] of [...fields,...enums])if(k in c)$(k).value=c[k];for(const [k] of switches)if(k in c)$(k).checked=c[k];resultCache=null;renderPreview();}
+function setConfig(c){for(const [k] of [...fields,...enums])if(k in c)$(k).value=c[k];for(const [k] of switches)if(k in c)$(k).checked=c[k];for(const [group] of typographyGroups)$(group+'_color').dispatchEvent(new Event('change',{bubbles:true}));resultCache=null;renderPreview();}
 const builtin={academic:{font:'Times New Roman',size:13,h1:16,h2:14,h3:13,line:1.5,left:3,right:2,top:2,bottom:2,paper:'A4',alignment:'justify'},business:{font:'Arial',size:11,h1:16,h2:13,h3:12,line:1.15,left:2.54,right:2.54,top:2.54,bottom:2.54,paper:'A4',alignment:'left'},proposal:{font:'Times New Roman',size:12,h1:16,h2:14,h3:12,line:1.5,left:2.54,right:2.54,top:2.54,bottom:2.54,paper:'A4',alignment:'justify'}};
 $('presetSelect').onchange=()=>{if(builtin[$('presetSelect').value])setConfig(builtin[$('presetSelect').value]);};
 function presets(){try{return JSON.parse(localStorage.getItem('reportstudio-presets')||'{}');}catch{return {};}}
@@ -90,8 +117,8 @@ function renderPreview(){
  function appendBlocks(target,blocks,model){
   for(const b of blocks){
    if(b.kind==='table'){const table=node('table',undefined,'preview-table'),body=node('tbody');for(const row of b.rows){const tr=node('tr');for(const cell of row){const td=node('td');td.colSpan=number(cell.span,1,100,1);appendBlocks(td,cell.blocks,model);tr.append(td);}body.append(tr);}table.append(body);target.append(table);continue;}
-   const p=node('p',undefined,'preview-paragraph');if(b.page_break)p.classList.add('preview-pagebreak');if(b.level)p.classList.add('preview-heading');if(b.alignment)p.style.textAlign=b.alignment;if(b.line)p.style.lineHeight=number(b.line,.5,4,1.5);if(font(b.font))p.style.fontFamily=font(b.font);if(b.size)p.style.fontSize=number(b.size,6,72,13)+'pt';if(b.bold!==undefined)p.style.fontWeight=b.bold?'bold':'normal';for(const [k,css] of [['left_indent','marginLeft'],['right_indent','marginRight'],['first_indent','textIndent'],['before','marginTop'],['after','marginBottom']])if(Number.isFinite(b[k]))p.style[css]=number(b[k],-150,300,0)+'pt';if(b.number)p.append(node('span',b.number+' '));
-   for(const seg of b.segments||[]){if(seg.kind==='break'){p.append(node('span','Page break','preview-page-marker'));continue;}if(seg.kind==='image'){const url=seg.asset?imageUrl(model,seg.asset):'';if(url){const img=node('img');img.src=url;img.alt='Embedded document image';img.loading='lazy';img.decoding='async';if(seg.width)img.style.width=number(seg.width,1,2000,400)+'px';p.append(img);}else p.append(node('span',seg.missing||'Image unavailable in preview','preview-image-placeholder'));continue;}const span=node('span',seg.text||'');if(seg.bold!==undefined)span.style.fontWeight=seg.bold?'bold':'normal';if(seg.italic)span.style.fontStyle='italic';if(seg.underline)span.style.textDecoration='underline';if(/^#[0-9a-f]{6}$/i.test(seg.color||''))span.style.color=seg.color;if(/^#[0-9a-f]{6}$/i.test(seg.highlight||''))span.style.backgroundColor=seg.highlight;if(font(seg.font))span.style.fontFamily=font(seg.font);if(seg.size)span.style.fontSize=number(seg.size,6,72,13)+'pt';p.append(span);}
+   const p=node('p',undefined,'preview-paragraph');if(b.page_break)p.classList.add('preview-pagebreak');if(b.level)p.classList.add('preview-heading');if(b.alignment)p.style.textAlign=b.alignment;if(b.line)p.style.lineHeight=number(b.line,.5,4,1.5);if(font(b.font))p.style.fontFamily=font(b.font);if(b.size)p.style.fontSize=number(b.size,6,72,13)+'pt';if(b.bold!==undefined)p.style.fontWeight=b.bold?'bold':'normal';if(b.italic!==undefined)p.style.fontStyle=b.italic?'italic':'normal';if(b.underline!==undefined)p.style.textDecoration=b.underline?'underline':'none';if(/^#[0-9a-f]{6}$/i.test(b.color||''))p.style.color=b.color;for(const [k,css] of [['left_indent','marginLeft'],['right_indent','marginRight'],['first_indent','textIndent'],['before','marginTop'],['after','marginBottom']])if(Number.isFinite(b[k]))p.style[css]=number(b[k],-150,300,0)+'pt';if(b.number)p.append(node('span',b.number+' '));
+   for(const seg of b.segments||[]){if(seg.kind==='break'){p.append(node('span','Page break','preview-page-marker'));continue;}if(seg.kind==='image'){const url=seg.asset?imageUrl(model,seg.asset):'';if(url){const img=node('img');img.src=url;img.alt='Embedded document image';img.loading='lazy';img.decoding='async';if(seg.width)img.style.width=number(seg.width,1,2000,400)+'px';p.append(img);}else p.append(node('span',seg.missing||'Image unavailable in preview','preview-image-placeholder'));continue;}const span=node('span',seg.text||'');if(seg.bold!==undefined)span.style.fontWeight=seg.bold?'bold':'normal';if(seg.italic!==undefined)span.style.fontStyle=seg.italic?'italic':'normal';if(seg.underline!==undefined)span.style.textDecoration=seg.underline?'underline':'none';if(/^#[0-9a-f]{6}$/i.test(seg.color||''))span.style.color=seg.color;if(/^#[0-9a-f]{6}$/i.test(seg.highlight||''))span.style.backgroundColor=seg.highlight;if(font(seg.font))span.style.fontFamily=font(seg.font);if(seg.size)span.style.fontSize=number(seg.size,6,72,13)+'pt';p.append(span);}
    if(!p.childNodes.length)p.append(document.createTextNode('\u00a0'));target.append(p);
   }
  }
@@ -114,6 +141,7 @@ async function loadFullPreview(force=false){
   renderPreview();status('Full document preview ready.');
  }catch(e){status(e.message,true);renderPreview();}finally{lock(false);}
 }
+$('typography').addEventListener('change',()=>{resultCache=null;renderPreview();});
 $('settings').addEventListener('change',()=>{resultCache=null;renderPreview();});$('extraSettings').addEventListener('change',()=>{resultCache=null;renderPreview();});$('switches').addEventListener('change',()=>{resultCache=null;renderPreview();});
 async function formatted(save){const payload={filename:name,config:config(),outline:$('outline').value,decisions:Object.fromEntries(rows.map(r=>[r.index,r.level]))};const key=JSON.stringify(payload);if(!save&&resultCache?.key===key)return resultCache.result;const result=await request('/api/format',{...payload,document:selectedFile,save_history:save});resultCache={key,result};return result;}
 $('sampleRules').onclick=async()=>{if(busy)return;const file=$('sampleFile').files[0];if(!file)return status('Select a sample DOCX first.',true);lock(true);status('Reading sample formatting…');try{const result=await request('/api/sample',{document:file});suggested=result.rules;const root=$('ruleReview');root.replaceChildren();for(const [k,v] of Object.entries(suggested)){if(!$(k))continue;const l=node('label');const i=node('input');i.type='checkbox';i.checked=true;i.dataset.rule=k;l.append(i,document.createTextNode(k+': '+v),node('small',result.evidence[k]||''));root.append(l);}for(const w of result.warnings)root.append(node('p',w,'muted'));$('applyRules').disabled=!Object.keys(suggested).length;status('Review sample styles, then apply selected rules.');}catch(e){status(e.message,true);}finally{lock(false);}};
@@ -158,7 +186,7 @@ setInterval(tickHistory,1000);
 function showStep(step){
  if(step>0&&step<4&&!selectedFile){status('Upload and analyze a document first.',true);return;}
  if(step===3&&(!processed||processed.key!==previewKey())){status('Apply formatting before downloading.',true);return;}
- wizardStep=step;
+ wizardStep=step;document.body.dataset.step=String(step);const labels=['Upload your Word document','Choose formatting settings','Review your document','Your formatted document','Batch formatting','Recent files'];$('heroTitle').textContent=labels[step];$('heroProgress').style.width=((Math.min(step,3)+1)*25)+'%';
  const groups=[['importPanel'],['formatPanel','requirementsPanel'],['reviewPanel','auditPanel'],['exportPanel'],['batchPanel'],['historyPanel']];
  for(const [i,ids] of groups.entries())for(const id of ids)$(id).hidden=i!==step;
  document.querySelectorAll('[data-step]').forEach(b=>{b.classList.toggle('active',Number(b.dataset.step)===step);b.setAttribute('aria-current',Number(b.dataset.step)===step?'step':'false');});
