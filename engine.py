@@ -118,6 +118,10 @@ def el(tag,**attrs):
 
 def set_font(obj,name,size):
     obj.font.name=name; obj.font.size=Pt(size)
+    rp=obj._element.get_or_add_rPr()
+    # Word can use szCs rather than sz for complex-script text.
+    cs=rp.find(qn('w:szCs'))
+    if cs is not None: cs.set(qn('w:val'),str(round(size*2)))
     fonts=obj._element.get_or_add_rPr().rFonts
     for k in ('ascii','hAnsi','eastAsia','cs'): fonts.set(qn('w:'+k),name)
     for k in ('asciiTheme','hAnsiTheme','eastAsiaTheme','cstheme','csTheme'): fonts.attrib.pop(qn('w:'+k),None)
@@ -222,6 +226,20 @@ def format_doc(data,raw_config,decisions):
             changes['protected']+=1
             if c['format_body'] and c['format_citations'] and not old and any(re.search(r'ADDIN\s+(?:EN\.|EN\b|ZOTERO|CSL|MENDELEY)',n.text or '',re.I) for n in p._p.iter(qn('w:instrText'))):
                 p.paragraph_format.line_spacing=c['line']; p.alignment=WD_ALIGN_PARAGRAPH.JUSTIFY; changes['citation_paragraphs_formatted']+=1
+            # Format only plain-text runs outside fields; never replace XML or image data.
+            if c['format_body'] and not old and not level and not has(p,{'sdt','ins','del','oMath','oMathPara','txbxContent'}):
+                in_field=0
+                for run in p.runs:
+                    markers=list(run._r.iter(qn('w:fldChar')))
+                    if markers:
+                        for marker in markers:
+                            kind=marker.get(qn('w:fldCharType'))
+                            if kind=='begin': in_field+=1
+                            elif kind=='end': in_field=max(0,in_field-1)
+                        continue
+                    if not in_field and run.text.strip() and all(x.tag in (qn('w:rPr'),qn('w:t'),qn('w:tab'),qn('w:br')) for x in run._r):
+                        set_font(run,c['font'],c['size'])
+                        changes['protected_text_runs_formatted']=changes.get('protected_text_runs_formatted',0)+1
             if level!=old: warnings.append(f'Paragraph {i+1}: protected content; heading change skipped.')
             continue
         if level and not c['format_headings']:
@@ -251,8 +269,9 @@ def format_doc(data,raw_config,decisions):
             if CAPTION.match(p.text) or (p.style and p.style.name=='Caption'):
                 if c['figures']: p.alignment=WD_ALIGN_PARAGRAPH.CENTER
                 if not c['format_body']: continue
-            elif p.style and p.style.name in ('Normal','Body Text','No Spacing'):
+            elif not old or i in chosen:
                 if not c['format_body']: continue
+                if p.style and p.style.name in ('Title','Subtitle'): continue
                 p.alignment=WD_ALIGN_PARAGRAPH.JUSTIFY; p.paragraph_format.line_spacing=c['line']; changes['body']+=1
             else: continue
             for r in p.runs:
