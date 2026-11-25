@@ -5,7 +5,7 @@ from collections import Counter
 from zipfile import ZipFile
 from lxml import etree
 from docx import Document
-from docx.shared import Cm, Pt
+from docx.shared import Cm, Pt, RGBColor
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml.ns import qn
 from engine import load, config, format_doc, heading_level, protected, el, set_font, unnumbered, prefix, parse_outline, ensure_paragraph_style
@@ -14,6 +14,15 @@ from document_preview import compare_images
 from layout_tools import cover_elements, fit_tables, resize_images, smart_pages
 
 EXTRA=dict(paper='A4',alignment='justify',before=0,after=6,first_indent=0,table_size=12,caption_size=12,caption_numbers=True,figure_list=True,table_list=True,page_numbers=True,page_start=1,page_position='center',page_format='decimal',update_fields=True,heading_uppercase=False,heading_bold=True,numbering_style='decimal',language='en',reference_style='none',table_fit=False,image_resize=False,smart_pages=False)
+# Explicit RGB colors prevent Word theme colors from overriding the requested text color.
+for group in ('body','heading','caption','table'):
+    EXTRA[group+'_color']='#000000'
+    for attr in ('bold','italic','underline'):
+        EXTRA[group+'_'+attr+'_mode']='preserve'
+EXTRA['heading_bold_mode']='on'
+EXTRA['heading_italic_mode']='off'
+EXTRA['heading_underline_mode']='off'
+
 def settings(raw):
     c={**config(raw),**EXTRA,**{k:v for k,v in raw.items() if k in EXTRA}}
     for k,v in EXTRA.items():
@@ -23,7 +32,49 @@ def settings(raw):
         if not lo<=c[k]<=hi: raise ValueError('Invalid '+k)
     for k,allowed in {'paper':['A4','A5','Letter'],'alignment':['justify','left','center'],'page_position':['left','center','right'],'page_format':['decimal','lowerRoman','upperRoman'],'numbering_style':['decimal','chapter','roman'],'language':['en','vi'],'reference_style':['none','APA','Harvard','IEEE']}.items():
         if c[k] not in allowed: raise ValueError('Invalid '+k)
+    for group in ('body','heading','caption','table'):
+        key=group+'_color'
+        if not isinstance(c[key],str) or not re.fullmatch(r'(?:#[0-9A-Fa-f]{6}|preserve)',c[key]):raise ValueError('Invalid '+key)
+        for attr in ('bold','italic','underline'):
+            key=group+'_'+attr+'_mode'
+            if c[key] not in ('preserve','on','off'):raise ValueError('Invalid '+key)
+    if 'heading_bold_mode' not in raw and 'heading_bold' in raw:
+        c['heading_bold_mode']='on' if c['heading_bold'] else 'off'
     return c
+
+def apply_typography(obj,c,group):
+    font=obj.font
+    color=c[group+'_color']
+    if color!='preserve':
+        font.color.rgb=RGBColor.from_string(color[1:].upper())
+        node=obj._element.get_or_add_rPr().find(qn('w:color'))
+        if node is not None:
+            for attr in ('themeColor','themeTint','themeShade'):
+                node.attrib.pop(qn('w:'+attr),None)
+    for attr in ('bold','italic','underline'):
+        mode=c[group+'_'+attr+'_mode']
+        if mode!='preserve':
+            setattr(font,attr,mode=='on')
+            if attr in ('bold','italic'):
+                rp=obj._element.get_or_add_rPr()
+                tag='bCs' if attr=='bold' else 'iCs'
+                cs=rp.find(qn('w:'+tag))
+                if cs is not None:cs.set(qn('w:val'),'1' if mode=='on' else '0')
+
+def safe_text_runs(p):
+    # Keep hyperlink, citation, field, drawing and revision XML untouched.
+    if any(n.tag.rsplit('}',1)[-1] in ('ins','del','sdt','txbxContent','oMath','oMathPara') for n in p._p.iter()):return
+    depth=0
+    for r in p.runs:
+        markers=list(r._r.iter(qn('w:fldChar')))
+        if markers:
+            for marker in markers:
+                kind=marker.get(qn('w:fldCharType'))
+                if kind=='begin':depth+=1
+                elif kind=='end':depth=max(0,depth-1)
+            continue
+        if not depth and r.text.strip() and all(n.tag in (qn('w:rPr'),qn('w:t'),qn('w:tab'),qn('w:br')) for n in r._r):
+            yield r
 
 def fields(data,allow_resize=False):
     counts=Counter()
@@ -133,7 +184,7 @@ def advanced(data,raw,decisions,outline=''):
         dims=paper[::-1] if s.page_width>s.page_height else paper
         s.page_width=Cm(dims[0]); s.page_height=Cm(dims[1])
     for n in range(1,10):
-        if c['format_headings'] and not skip: ensure_paragraph_style(d,f'Heading {n}').font.bold=c['heading_bold']
+        if c['format_headings'] and not skip: apply_typography(ensure_paragraph_style(d,f'Heading {n}'),c,'heading')
     normal=ensure_paragraph_style(d,'Normal')
     if c['format_body'] and not skip: normal.paragraph_format.alignment=align[c['alignment']]
     counts=Counter(); first=None; existing_caption_fields=False
@@ -143,6 +194,9 @@ def advanced(data,raw,decisions,outline=''):
         if first is None and lev and not unnumbered(p.text): first=p
         if protected(p):
             if any('SEQ' in (n.text or '') for n in p._p.iter(qn('w:instrText'))): existing_caption_fields=True
+            # Change ordinary runs only; field result and hyperlink runs are excluded.
+            if not lev and c['format_body'] and not any('ADDIN' in (n.text or '').upper() for n in p._p.iter(qn('w:instrText'))):
+                for r in safe_text_runs(p):apply_typography(r,c,'body')
             continue
         m=CAP.match(p.text)
         if m and c['figures']:
@@ -153,14 +207,16 @@ def advanced(data,raw,decisions,outline=''):
                 p.clear(); p.style=ensure_paragraph_style(d,'Caption'); label=({'Figure':'Hình','Table':'Bảng'}[kind] if c['language']=='vi' else kind)
                 p.add_run(label+' '); field(p,'SEQ '+kind+' \\* ARABIC',str(counts[kind])); p.add_run(': '+m.group(3))
             p.alignment=WD_ALIGN_PARAGRAPH.CENTER
-            for r in p.runs: set_font(r,c['font'],c['caption_size'])
+            for r in p.runs:
+                set_font(r,c['font'],c['caption_size']); apply_typography(r,c,'caption')
         elif lev and c['format_headings']:
             for r in p.runs:
-                r.bold=c['heading_bold']
+                apply_typography(r,c,'heading')
                 if lev==1 and c['heading_uppercase']: r.text=r.text.upper()
         elif not lev and c['format_body'] and p.style.name not in ('Title','Subtitle','Caption'):
             p.alignment=align[c['alignment']]; f=p.paragraph_format
             f.space_before=Pt(c['before']); f.space_after=Pt(c['after']); f.first_line_indent=Cm(c['first_indent'])
+            for r in p.runs: apply_typography(r,c,'body')
     if c['tables']:
         for t in d.tables:
             if t._tbl in skip: continue
@@ -168,14 +224,22 @@ def advanced(data,raw,decisions,outline=''):
                 for cell in row.cells:
                     for p in cell.paragraphs:
                         if not protected(p):
-                            for r in p.runs: set_font(r,c['font'],c['table_size'])
-    if c['format_headings'] and c['numbering'] and c['numbering_style']!='decimal' and report['heading']:
+                            for r in p.runs:
+                                set_font(r,c['font'],c['table_size']); apply_typography(r,c,'table')
+    if c['format_headings'] and c['numbering'] and report['heading']:
         root=d.part.numbering_part.element
         abstracts=root.findall(qn('w:abstractNum'))
         if abstracts:
             for level in abstracts[-1].findall(qn('w:lvl')):
                 i=int(level.get(qn('w:ilvl')))
-                if i==0:
+                rp=level.find(qn('w:rPr'))
+                if rp is None:rp=el('rPr');level.append(rp)
+                if c['heading_color']!='preserve':
+                    color=rp.find(qn('w:color'))
+                    if color is None:color=el('color');rp.append(color)
+                    color.set(qn('w:val'),c['heading_color'][1:].upper())
+                    for attr in ('themeColor','themeTint','themeShade'):color.attrib.pop(qn('w:'+attr),None)
+                if i==0 and c['numbering_style']!='decimal':
                     if c['numbering_style']=='roman': level.find(qn('w:numFmt')).set(qn('w:val'),'upperRoman')
                     else: level.find(qn('w:lvlText')).set(qn('w:val'),('Chương ' if c['language']=='vi' else 'Chapter ')+'%1.')
     instructions=' '.join(n.text or '' for n in d._element.iter(qn('w:instrText')))
@@ -217,7 +281,7 @@ def advanced(data,raw,decisions,outline=''):
     import hashlib
     report['input_sha256']=hashlib.sha256(data).hexdigest()
     report['output_sha256']=hashlib.sha256(out).hexdigest()
-    report['applied_settings']={k:c[k] for k in ('font','size','line','h1','h2','h3','left','right','top','bottom','paper','format_body','format_headings','format_layout','protect_cover')}
+    report['applied_settings']={k:c[k] for k in ('font','size','line','h1','h2','h3','left','right','top','bottom','paper','format_body','format_headings','format_layout','protect_cover','body_color','heading_color','caption_color','table_color')}
     changed=changed_document_parts(data,out)
     report['change_report']['unchanged']=not changed
     report['change_report']['changed_parts']=changed
