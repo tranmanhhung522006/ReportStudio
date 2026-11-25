@@ -198,7 +198,7 @@ def format_doc(data,raw_config,decisions):
     skip=cover_elements(d,c['protect_cover'])
     changes=dict(heading=0,body=0,tables=0,figures=0,protected=0,toc_added=False,warnings=[])
     warnings=changes['warnings']; changes['cover_protected']=bool(skip); changes['cleanup_runs']=0; changes['citation_paragraphs_formatted']=0
-    if c['protect_cover'] and not skip: warnings.append('Cover protection requires an existing section break after the cover. No changes applied.'); return data,changes
+    if c['protect_cover'] and not skip: raise ValueError('Cover protection requires a section break after the cover. Turn off cover protection or add a section break in Word.')
     chosen={int(k):int(v) for k,v in decisions.items()}; paras=list(d.paragraphs)
     if any(i<0 or i>=len(paras) or not 0<=v<=9 for i,v in chosen.items()): raise ValueError('Invalid paragraph selection.')
     for i,sec in enumerate(d.sections):
