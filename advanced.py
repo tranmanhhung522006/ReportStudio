@@ -10,6 +10,7 @@ from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml.ns import qn
 from engine import load, config, format_doc, heading_level, protected, el, set_font, unnumbered, prefix, parse_outline, ensure_paragraph_style
 from citation_guard import compare_citations
+from document_preview import compare_images
 from layout_tools import cover_elements, fit_tables, resize_images, smart_pages
 
 EXTRA=dict(paper='A4',alignment='justify',before=0,after=6,first_indent=0,table_size=12,caption_size=12,caption_numbers=True,figure_list=True,table_list=True,page_numbers=True,page_start=1,page_position='center',page_format='decimal',update_fields=True,heading_uppercase=False,heading_bold=True,numbering_style='decimal',language='en',reference_style='none',table_fit=False,image_resize=False,smart_pages=False)
@@ -56,7 +57,8 @@ def fields(data,allow_resize=False):
 def integrity(before,after,allow_resize=False):
     a,b=fields(before,allow_resize),fields(after,allow_resize); missing=a-b
     citations=compare_citations(before,after)
-    return {'passed':not missing and citations['passed'],'citation_integrity':citations,'protected_objects':sum(a.values()),'citation_fields':sum(v for k,v in a.items() if k[0]=='citation'),'missing':sum(missing.values()),'missing_types':sorted({k[0] for k in missing})}
+    images=compare_images(before,after)
+    return {'passed':not missing and citations['passed'] and images['passed'],'image_integrity':images,'citation_integrity':citations,'protected_objects':sum(a.values()),'citation_fields':sum(v for k,v in a.items() if k[0]=='citation'),'missing':sum(missing.values()),'missing_types':sorted({k[0] for k in missing})}
 
 def audit(data,raw,outline=''):
     d=load(data); c=settings(raw); issues=[]; checks=Counter(); failed=Counter()
@@ -198,7 +200,7 @@ def advanced(data,raw,decisions,outline=''):
     report['tables_fitted']=fit_tables(d,skip) if c['table_fit'] else 0
     report['images_resized']=resize_images(d,skip) if c['image_resize'] else 0
     b=io.BytesIO(); d.save(b); out=b.getvalue(); guard=integrity(data,out,c['image_resize'])
-    if not guard['passed']: raise ValueError('Integrity check failed: '+', '.join(guard['missing_types'] or ['citation payload'])+'. Original document remains untouched.')
+    if not guard['passed']: raise ValueError('Integrity check failed: '+', '.join(guard['missing_types'] or ['citation or image relationship'])+'. Original document remains untouched.')
     report.update(integrity=guard,audit=audit(out,c,outline),captions=dict(counts))
     report['change_report']={k:report.get(k,0) for k in ('heading','body','tables','figures','cleanup_runs','citation_paragraphs_formatted','tables_fitted','images_resized','cover_protected','smart_pages_applied','toc_added')}
     if existing_caption_fields: report['warnings'].append('Existing caption fields preserved; refresh and verify sequence identifiers in Word.')
