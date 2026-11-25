@@ -8,7 +8,7 @@ from docx import Document
 from docx.shared import Cm, Pt
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml.ns import qn
-from engine import load, config, format_doc, heading_level, protected, el, set_font, unnumbered, prefix, parse_outline
+from engine import load, config, format_doc, heading_level, protected, el, set_font, unnumbered, prefix, parse_outline, ensure_paragraph_style
 from citation_guard import compare_citations
 from layout_tools import cover_elements, fit_tables, resize_images, smart_pages
 
@@ -84,8 +84,8 @@ def audit(data,raw,outline=''):
         expected=c['h'+str(min(lev,3))] if lev else c['caption_size'] if p.style.name=='Caption' else c['size']
         for run in p.runs:
             if not run.text.strip(): continue
-            f=run.font.name or p.style.font.name or d.styles['Normal'].font.name
-            size=run.font.size or p.style.font.size or d.styles['Normal'].font.size
+            f=run.font.name or p.style.font.name or ensure_paragraph_style(d,'Normal').font.name
+            size=run.font.size or p.style.font.size or ensure_paragraph_style(d,'Normal').font.size
             check('Font',f==c['font'],loc,f'Expected {c["font"]}, found {f or "inherited"}')
             check('Font size',size is not None and abs(size.pt-expected)<.1,loc,f'Expected {expected} pt')
         if not lev and p.style.name!='Caption':
@@ -121,8 +121,8 @@ def advanced(data,raw,decisions,outline=''):
         dims=paper[::-1] if s.page_width>s.page_height else paper
         s.page_width=Cm(dims[0]); s.page_height=Cm(dims[1])
     for n in range(1,10):
-        if c['format_headings'] and not skip: d.styles[f'Heading {n}'].font.bold=c['heading_bold']
-    normal=d.styles['Normal']
+        if c['format_headings'] and not skip: ensure_paragraph_style(d,f'Heading {n}').font.bold=c['heading_bold']
+    normal=ensure_paragraph_style(d,'Normal')
     if c['format_body'] and not skip: normal.paragraph_format.alignment=align[c['alignment']]
     counts=Counter(); first=None; existing_caption_fields=False
     for p in list(d.paragraphs):
@@ -138,7 +138,7 @@ def advanced(data,raw,decisions,outline=''):
             counts[kind]+=1
             if c['caption_numbers'] and not lev and all(all(x.tag in (qn('w:rPr'),qn('w:t')) for x in r._r) for r in p.runs):
                 # Retain title text and native sequence; existing complex captions are never rewritten.
-                p.clear(); p.style=d.styles['Caption']; label=({'Figure':'Hình','Table':'Bảng'}[kind] if c['language']=='vi' else kind)
+                p.clear(); p.style=ensure_paragraph_style(d,'Caption'); label=({'Figure':'Hình','Table':'Bảng'}[kind] if c['language']=='vi' else kind)
                 p.add_run(label+' '); field(p,'SEQ '+kind+' \\* ARABIC',str(counts[kind])); p.add_run(': '+m.group(3))
             p.alignment=WD_ALIGN_PARAGRAPH.CENTER
             for r in p.runs: set_font(r,c['font'],c['caption_size'])
