@@ -128,6 +128,64 @@ def full_preview(data):
     """No 300-paragraph truncation. Return body blocks, not untrusted HTML."""
     d=load(data); assets={}; used=0; warnings=set(); image_count=0
     marker=numbering_preview(d)
+    # Resolve the OOXML color scheme as Word does, including theme tint/shade.
+    theme={}
+    try:
+        from docx.opc.constants import RELATIONSHIP_TYPE as RT
+        tree=xml(d.part.part_related_by(RT.THEME).blob)
+        scheme=next((n for n in tree.iter() if local(n)=='clrScheme'),None)
+        if scheme is not None:
+            for n in scheme:
+                v=next(iter(n),None)
+                if v is not None:
+                    color=v.get('lastClr') or v.get('val')
+                    if color and re.fullmatch(r'[0-9a-fA-F]{6}',color):theme[local(n)]=color
+    except (KeyError,AttributeError,StopIteration,ValueError):pass
+    aliases={'text1':'dk1','text2':'dk2','background1':'lt1','background2':'lt2','hyperlink':'hlink','followedHyperlink':'folHlink','dark1':'dk1','dark2':'dk2','light1':'lt1','light2':'lt2'}
+    def resolve_color(rp):
+        n=rp.find(qn('w:color')) if rp is not None else None
+        if n is None:return None
+        token=n.get(qn('w:themeColor'))
+        color=theme.get(aliases.get(token,token)) if token else None
+        from_theme=color is not None
+        color=color or n.get(qn('w:val'))
+        if color=='auto':return '#000000'
+        if not color or not re.fullmatch(r'[0-9a-fA-F]{6}',color):return None
+        rgb=[int(color[i:i+2],16) for i in (0,2,4)]
+        for attr in ('themeShade','themeTint') if from_theme else ():
+            factor=n.get(qn('w:'+attr))
+            if factor and re.fullmatch(r'[0-9a-fA-F]{2}',factor):
+                t=int(factor,16)/255
+                rgb=[round(v*t if attr=='themeShade' else 255-(255-v)*t) for v in rgb]
+        return '#'+''.join(f'{v:02x}' for v in rgb)
+    styles_by_id={st.style_id:st for st in d.styles}
+    def run_props(rp,paragraph_style):
+        cs=styles_by_id.get(child_val(rp,'rStyle'))
+        return [rp]+[st._element.rPr for st in style_chain(cs)]+[st._element.rPr for st in style_chain(paragraph_style)]
+    def effective_text(props,t):
+        for r in props:
+            if r is None:continue
+            for tag,key in [('b','bold'),('i','italic'),('u','underline')]:
+                v=child_val(r,tag,'1') if r.find(qn('w:'+tag)) is not None else None
+                if v is not None and key not in t:t[key]=v not in ('0','false','none','off')
+            if 'color' not in t:
+                color=resolve_color(r)
+                if color:t['color']=color
+            if 'highlight' not in t:
+                h=child_val(r,'highlight')
+                if h in HIGHLIGHTS:t['highlight']=HIGHLIGHTS[h]
+                elif h=='none':t['highlight']='#ffffff'
+            if 'size' not in t:
+                size=child_val(r,'sz')
+                if size is not None:
+                    try:t['size']=float(size)/2
+                    except (ValueError,TypeError):pass
+            if not t.get('font'):
+                font=r.find(qn('w:rFonts'))
+                if font is not None:
+                    name=font.get(qn('w:ascii')) or font.get(qn('w:hAnsi'))
+                    if name:t['font']=name
+        return t
     def image_ref(rid,owner,holder):
         nonlocal used,image_count
         image_count+=1
@@ -156,7 +214,7 @@ def full_preview(data):
         except (KeyError,ValueError,AttributeError):
             warnings.add('Some original image links could not be resolved.')
             return {'kind':'image','missing':'Unresolved image reference'}
-    def value(n,owner):
+    def value(n,owner,paragraph_style=None):
         kind=local(n)
         if kind in ('drawing','pict'):
             # A drawing can have a primary image and fallback; render the first supported one.
@@ -171,7 +229,7 @@ def full_preview(data):
         if kind=='AlternateContent':
             fallback=next((x for x in n if local(x)=='Fallback'),None)
             choice=fallback if fallback is not None else next(iter(n),None)
-            return value(choice,owner) if choice is not None else []
+            return value(choice,owner,paragraph_style) if choice is not None else []
         if kind in ('t','delText') and kind!='delText': return [{'kind':'text','text':n.text or ''}]
         if kind=='tab': return [{'kind':'text','text':'\t'}]
         if kind in ('br','cr'):
@@ -180,24 +238,11 @@ def full_preview(data):
         if kind=='r':
             rp=n.find(qn('w:rPr')); items=[]
             for x in n:
-                for t in value(x,owner):
-                    if t['kind']=='text' and rp is not None:
-                        for tag,key in [('b','bold'),('i','italic'),('u','underline')]:
-                            setting=rp.find(qn('w:'+tag))
-                            if setting is not None: t[key]=setting.get(qn('w:val'),'1') not in ('0','false','none','off')
-                        color=child_val(rp,'color')
-                        if color and re.fullmatch(r'[0-9a-fA-F]{6}',color):t['color']='#'+color
-                        highlight=child_val(rp,'highlight')
-                        if highlight in HIGHLIGHTS:t['highlight']=HIGHLIGHTS[highlight]
-                        size=rp.find(qn('w:sz'))
-                        if size is not None:
-                            try: t['size']=float(size.get(qn('w:val')))/2
-                            except (ValueError,TypeError): pass
-                        font=rp.find(qn('w:rFonts'))
-                        if font is not None: t['font']=font.get(qn('w:ascii')) or font.get(qn('w:hAnsi'))
+                for t in value(x,owner,paragraph_style):
+                    if t['kind']=='text':effective_text(run_props(rp,paragraph_style),t)
                     items.append(t)
             return items
-        return [t for x in n for t in value(x,owner)]
+        return [t for x in n for t in value(x,owner,paragraph_style)]
     def blocks(parent,owner):
         out=[]
         for n in parent:
@@ -207,7 +252,7 @@ def full_preview(data):
                 f=p.paragraph_format
                 align=f.alignment if f.alignment is not None else st.paragraph_format.alignment if st is not None else None
                 line=f.line_spacing if f.line_spacing is not None else st.paragraph_format.line_spacing if st is not None else None
-                b={'kind':'paragraph','level':heading_level(p),'segments':value(n,owner),
+                b={'kind':'paragraph','level':heading_level(p),'segments':value(n,owner,st),
                    'alignment':{0:'left',1:'center',2:'right',3:'justify'}.get(align,'left'),
                    'page_break':bool(f.page_break_before)}
                 b['number']=marker(p)
@@ -224,6 +269,7 @@ def full_preview(data):
                     if 'font' not in b and style.font.name:b['font']=style.font.name
                     if 'size' not in b and style.font.size:b['size']=style.font.size.pt
                     if 'bold' not in b and style.font.bold is not None:b['bold']=style.font.bold
+                effective_text([style._element.rPr for style in style_chain(st)],b)
                 out.append(b)
             elif tag=='tbl':
                 rows=[]
